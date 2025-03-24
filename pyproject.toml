@@ -1,0 +1,50 @@
+[tool.poetry]
+name = "indra"
+version = "0.1.0"
+description = ""
+authors = ["Sai Sneha <sneha@artpark.in>"]
+license = "GPL-3.0-or-later"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+typer = "^0.15.2"
+boto3 = "^1.37.18"
+cdsapi = "^0.7.5"
+pandas = "^2.2.3"
+netcdf4 = "^1.7.2"
+scipy = "^1.15.2"
+geopandas = "^1.0.1"
+pyyaml = "^6.0.2"
+beautifulsoup4 = "^4.13.3"
+joblib = "^1.4.2"
+python-dotenv = "^1.0.1"
+
+
+[tool.poetry.group.dev.dependencies]
+ipython = "^9.0.2"
+
+
+[tool.poetry.group.docs.dependencies]
+sphinx = "^8.2.3"
+furo = "^2024.8.6"
+myst-parser = "^4.0.1"
+sphinx-design = "^0.6.1"
+linkify-it-py = "^2.0.3"
+sphinx-copybutton = "^0.5.2"
+sphinx-autodoc2 = "^0.5.0"
+sphinx-togglebutton = "^0.3.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+indra = "indra.cli:app"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "FLY", "RUF", "B", "ICN"]
+
+[tool.ruff]
+line-length = 140
+
