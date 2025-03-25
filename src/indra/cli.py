@@ -3,7 +3,7 @@ from typing import Optional
 
 import typer
 
-from indra.fetch.cds import app as cds_app
+from indra.fetch import cds_app, imd_app
 from indra.logging_config import configure_logging
 
 # Create the main app
@@ -65,6 +65,6 @@ app.add_typer(fetch_app, name="fetch")
 
 # Add cds as a subcommand to fetch
 fetch_app.add_typer(cds_app, name="cds")
-
+fetch_app.add_typer(imd_app, name="imd")
 if __name__ == "__main__":
     app(obj={})

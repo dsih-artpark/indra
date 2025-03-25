@@ -36,4 +36,4 @@ ecpds:
   ds_name: 'ECPDS_Operational_Forecasts'
   folder_name: '00z_ifs_0p25_oper'
   ds_source: 'ECMWF ECPDS'
-  extensions: ["grib2", "index"] 
+  extensions: ["grib2", "index"]

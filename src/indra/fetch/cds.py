@@ -319,7 +319,7 @@ def fetch_and_upload_cds_data(
     log_level: str = "DEBUG",
     current_month: bool = True,
     log_filename: Union[str, None] = None,
-) -> tuple[bool, int, datetime]:
+    ) -> tuple[bool, int, datetime]:
     """
     Process CDS ERA5 daily data
     """

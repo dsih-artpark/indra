@@ -1,0 +1,1 @@
+~/miniconda3/envs/indra_dev/bin/python -m indra fetch imd weather-data-jobs.yaml
