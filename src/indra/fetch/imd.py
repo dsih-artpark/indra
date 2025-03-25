@@ -177,8 +177,12 @@ def retrieve_live_data_from_imd(datacode: str, timecode: str, params: dict):
         logger.debug(f"Data saved to {output_dir / f'{time}.csv'}")
 
         # Upload the data to S3
-        upload_data_to_s3(upload_dir=output_dir, Bucket=shared_params['s3_bucket'], Prefix=s3_prefix, extension=imd_params['extension'])
-        logger.debug(f"Data uploaded to {s3_prefix}")
+        success = upload_data_to_s3(upload_dir=output_dir, Bucket=shared_params['s3_bucket'],
+                                    Prefix=s3_prefix, extension=imd_params['extension'])
+        if success:
+            logger.debug(f"Data uploaded to {s3_prefix}")
+        else:
+            logger.error(f"Failed to upload data to {s3_prefix}")
     else:
         logger.error(f"Failed to download data from {url}. HTTP Status code: {response.status_code}")
         raise HTTPError(f"Failed to download data from {url}. HTTP Status code: {response.status_code}")

@@ -2,7 +2,6 @@ import logging
 import os
 
 import boto3
-from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +50,6 @@ def upload_data_to_s3(*,
     )
     ```
     """
-    load_dotenv()
     logger.info("Starting upload of data to S3 bucket")
     logger.debug(f"Upload directory: {upload_dir}")
     logger.debug(f"Bucket name: {Bucket}")

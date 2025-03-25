@@ -1,7 +1,9 @@
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import typer
+from dotenv import load_dotenv
 
 from indra.fetch import cds_app, imd_app
 from indra.logging_config import configure_logging
@@ -12,6 +14,24 @@ app = typer.Typer(
     help="CLI tool for fetching and processing weather data",
 )
 
+def load_environment():
+    """Load environment variables from .env file"""
+    # Try to find .env file in current directory or parent directories
+    env_path = Path('.env')
+    if not env_path.exists():
+        raise typer.Exit(
+            "No .env file found in current directory.\n"
+            "Please create one by copying example.env:\n"
+            "cp example.env .env"
+        )
+    # Load the .env file
+    if not load_dotenv(env_path):
+        raise typer.Exit(f"Failed to load environment variables from {env_path}")
+
+@app.callback()
+def callback():
+    """Initialize the CLI application"""
+    load_environment()
 # Create a fetch subcommand group
 fetch_app = typer.Typer(
     name="fetch",
