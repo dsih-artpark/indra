@@ -38,7 +38,7 @@ class Report:
             self.run_date = datetime.now().strftime("%Y%m%d")
         else:
             self.run_date = run_date
-        self.email_recipients = email_recipients
+        self.email_recipients = ", ".join(email_recipients)
 
 
         self.reports = []
@@ -116,7 +116,7 @@ class Report:
             )
 
             self.message.attach(part)
-            print("added attachment")
+            logger.info(f"Added attachment: {attachment_name}")
         except Exception as e:
             logger.error(f"Failed to attach file {filepath}: {e}")
             raise
