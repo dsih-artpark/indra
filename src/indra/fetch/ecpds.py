@@ -3,15 +3,14 @@ from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Optional, Union
 
-import requests
 import typer
 from bs4 import BeautifulSoup
 from requests.exceptions import HTTPError
 
 from indra.emails import Report, Status
-from indra.io import download_from_url, get_params, upload_data_to_s3
+from indra.io import download_from_url, get_params, retry_session, upload_data_to_s3
 
-logger = logging.getLogger("indrafetch")
+logger = logging.getLogger(__name__)
 logging.captureWarnings(True)
 
 app = typer.Typer()
@@ -44,7 +43,9 @@ def last_date_of_ecpds_data(*,
     """
 
     logger.debug(f"Request URL: {ecpds_url}")
-    response = requests.get(url=ecpds_url, timeout=10)
+
+    session = retry_session(max_retries=10, backoff_factor=0.5)
+    response = session.get(url=ecpds_url, timeout=10)
     if response.status_code != 200:
         logger.error(f"Failed to retrieve the directory: {response.status_code}")
         return None
@@ -71,7 +72,6 @@ def last_date_of_ecpds_data(*,
     if dates:
         # Find the maximum date in the list
         max_date = max(dates)
-
         # Create a datetime object for 8:49 UTC on the max date
         threshold_time = datetime.combine(max_date, time(8, 49), tzinfo=timezone.utc)
 
