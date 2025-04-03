@@ -391,6 +391,14 @@ def main(
             "-d/-D",
             help="Enable debug mode, send email without actually downloading data"
         )
+    ] = False,
+    debug_upload_success: Annotated[
+        bool,
+        typer.Option(
+            "--debug-upload-success/--no-debug-upload-success",
+            "-u/-U",
+            help="When debug mode is enabled, what should the upload_success be set to. If True, run will simulate a successful upload."
+        )
     ] = False
 ) -> None:
     """Process and upload CDS ERA5 daily data to S3.
@@ -420,12 +428,9 @@ def main(
             )
 
         else:
-            upload_success = True
+            upload_success = debug_upload_success
             no_files = 0
             latest_timestamp = datetime.now()
-
-        params = get_params(yaml_path=yaml_path)
-        cds_params = params['cds']
 
         dataset_name = cds_params['ds_name'].replace('_', ' ')
         dataset_source = cds_params['ds_source']
@@ -439,7 +444,7 @@ def main(
                 f"The last timestamp of data availability for {dataset_name} is {latest_timestamp} UTC, "
                 f"when checked at approximately {current_timestamp} UTC."
                 f"Detailed health of the run can be found in the debug log file for the "
-                f"current month on the server: logs/indrafetch-{datetime.now().strftime('%Y-%m')}-debug.log."
+                f"current month on the server: logs/{parent_config.get('log_file')}"
             )
             report.add_a_status_report('CDS Upload', Status.SUCCESS, message)
         else:
@@ -457,10 +462,10 @@ def main(
 
     finally:
         if report.any_criticals():
-            report.add_attachment(f'logs/{parent_config.get("log_file")}.log')
+            report.add_attachment(f'logs/{parent_config.get("log_file")}')
         report.send_email()
 
 if __name__ == "__main__":
     app()
 
-all = ["last_date_of_cds_data", "check_cds_credentials", "retrieve_data_from_cds", "fetch_and_upload_cds_data", "main", "app"]
+__all__ = ["app", "check_cds_credentials", "fetch_and_upload_cds_data", "last_date_of_cds_data", "main", "retrieve_data_from_cds"]
