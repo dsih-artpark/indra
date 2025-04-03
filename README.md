@@ -115,9 +115,9 @@ AWS_DEFAULT_REGION=ap-south-1
 
 # Email Configuration
 SMTP_SERVER=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USERNAME=your.email@gmail.com
-SMTP_PASSWORD=your_app_specific_password
+PORT=587
+EMAIL=your.email@gmail.com
+PASSWORD=your_app_specific_password
 ```
 
 ## Features

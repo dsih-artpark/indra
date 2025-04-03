@@ -29,7 +29,7 @@ def load_environment():
         raise typer.Exit(f"Failed to load environment variables from {env_path}")
 
 @app.callback()
-def callback():
+def callback(ctx: typer.Context):
     """Initialize the CLI application"""
     load_environment()
 # Create a fetch subcommand group
@@ -61,6 +61,7 @@ def main(
     """Initialize logging for the entire CLI application."""
     # Ensure we have a context object
     ctx.obj = ctx.obj or {}
+    load_environment()
 
     # Generate default log filename if none provided
     if log_file is None:
