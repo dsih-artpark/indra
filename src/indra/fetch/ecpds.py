@@ -1,15 +1,20 @@
 import logging
 from datetime import datetime, time, timedelta, timezone
-from typing import Optional, Union
+from pathlib import Path
+from typing import Annotated, Optional, Union
 
 import requests
+import typer
 from bs4 import BeautifulSoup
 from requests.exceptions import HTTPError
 
-from indra.io import download_from_url
+from indra.emails import Report, Status
+from indra.io import download_from_url, get_params, upload_data_to_s3
 
 logger = logging.getLogger("indrafetch")
 logging.captureWarnings(True)
+
+app = typer.Typer()
 
 
 def last_date_of_ecpds_data(*,
@@ -257,3 +262,168 @@ def retrieve_data_from_ecpds(*,
     else:
         logger.warning(f"Failed to retrieve data and index files from ECPDS for date {date}")
         return False
+
+
+def fetch_and_upload_ecpds_data(*,
+                                yaml_path: Path,
+                                get_latest_date: bool = True,
+                                log_level: str = "DEBUG",
+                                custom_date: Optional[str] = None,
+                                log_filename: Optional[str] = None,
+                                ) -> tuple[bool, int, datetime]:
+    """
+    Process CDS ERA5 daily data
+
+    :param Path yaml_path:
+        The path to the YAML configuration file.
+
+    :param bool get_latest_date:
+        Whether to retrieve the latest available forecast data.
+
+        **Default**: ``True``
+
+    :param Optional[str] custom_date:
+        The date of the forecast data to retrieve. Ignored if `get_latest_date` is True.
+
+    :param Optional[str] log_filename:
+        The filename of the log file.
+    """
+    params = get_params(yaml_path=yaml_path)
+    ecpds_params = params['ecpds']
+    shared_params = params['shared_params']
+
+    latest_date = last_date_of_ecpds_data()
+
+    s3_prefix = f"{ecpds_params['ds_id']}-{ecpds_params['ds_name']}/{ecpds_params['folder_name']}/{latest_date.strftime('%Y')}"
+    local_region_dir = Path(shared_params['local_data_dir']).expanduser() / Path(shared_params['s3_bucket']) / Path(s3_prefix)
+    local_region_dir.mkdir(parents=True, exist_ok=True)
+
+    retrieve_data_from_ecpds(get_latest_date=get_latest_date, custom_date=custom_date, ecpds_base_url=ecpds_params['url'],
+                                            output_dir=local_region_dir, zulu_utc_timestamp=ecpds_params['zulu_utc_timestamp'],
+                                            resolution=ecpds_params['resolution'],
+                                            model=ecpds_params['model'], forecast_type=ecpds_params['forecast_type'],
+                                            forecast_times=ecpds_params['forecast_times'],
+                                            raise_error=ecpds_params['raise_error'], chunk=ecpds_params['chunk'],
+                                            chunk_size=ecpds_params['chunk_size'])
+
+
+    upload_success = [None] * len(ecpds_params['extensions'])
+    no_files = [None] * len(ecpds_params['extensions'])
+
+    for i, extension in enumerate(ecpds_params['extensions']):
+        no_files[i] = len(list(local_region_dir.glob(f"*.{extension}")))
+        upload_success[i] = upload_data_to_s3(upload_dir=local_region_dir, Bucket=shared_params['s3_bucket'],
+                                     Prefix=s3_prefix, extension=extension)
+
+    upload_success = all(upload_success)
+    no_files = sum(no_files)
+
+    return upload_success, no_files, latest_date
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    yaml_path: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            resolve_path=True,
+            help="Path to YAML configuration file containing ECPDS parameters"
+        )
+    ],
+    get_latest_date: Annotated[
+        bool,
+        typer.Option(
+            "--get-latest-date/--custom-date",
+            "-g/-c",
+            help="Use current month for date range, or use dates from config"
+        )
+    ] = True,
+    debug: Annotated[
+        bool,
+        typer.Option(
+            "--debug/--no-debug",
+            "-d/-D",
+            help="Enable debug mode, send email without actually downloading data"
+        )
+    ] = False,
+    debug_upload_success: Annotated[
+        bool,
+        typer.Option(
+            "--debug-upload-success/--no-debug-upload-success",
+            "-u/-U",
+            help="When debug mode is enabled, what should the upload_success be set to. If True, run will simulate a successful upload."
+        )
+    ] = False,
+    custom_date: Annotated[
+        Optional[str],
+        typer.Option(
+            "--custom-date",
+            "-c",
+            help="Date to retrieve forecast data for"
+        )
+    ] = None
+) -> None:
+    """
+    Process ECPDS forecast data
+    """
+    parent_config = ctx.obj or {}
+    params = get_params(yaml_path=yaml_path)
+    email_recipients = params['shared_params']['email_recipients']
+    ecpds_params = params['ecpds']
+
+    report = Report(
+        job_name="ECPDS Daily Job",
+        email_recipients=email_recipients
+    )
+
+    try:
+        if not debug:
+            upload_success, no_files, latest_timestamp = fetch_and_upload_ecpds_data(
+                yaml_path=yaml_path,
+                get_latest_date=get_latest_date,
+                custom_date=custom_date,
+                log_level=parent_config.get("log_level", "INFO"),
+                log_filename=parent_config.get("log_file")
+            )
+
+        else:
+            upload_success = debug_upload_success
+            no_files = 0
+            latest_timestamp = datetime.now()
+
+        dataset_name = ecpds_params['ds_name'].replace('_', ' ')
+        dataset_source = ecpds_params['ds_source']
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if upload_success:
+            message = (
+                f"All {no_files} files obtained from {dataset_name} "
+                f"on {dataset_source} have been successfully uploaded to S3 on {current_date}.\n"
+                f"The last timestamp of data availability for {dataset_name} is {latest_timestamp} UTC, "
+                f"when checked at approximately {current_timestamp} UTC."
+            )
+            report.add_a_status_report('ECPDS Upload', Status.SUCCESS, message)
+        else:
+            message = (
+                    f"One or more files from {dataset_name} "
+                    f"on {dataset_source} have failed to upload to S3 on {current_date}.\n"
+                    f"The last timestamp of data availability for {dataset_name} is {latest_timestamp} UTC, "
+                    f"when checked at approximately {current_timestamp} UTC.\n"
+                    f"Detailed health of the run can be found in the attached debug log file."
+                )
+            report.add_a_status_report('ECPDS Upload', Status.ERROR, message)
+    except Exception as e:
+        report.add_a_status_report('General', Status.CRITICAL, f'Exception raised: {e}')
+    finally:
+        if report.any_criticals():
+            report.add_attachment(f'logs/{parent_config.get("log_file")}')
+        report.send_email()
+
+if __name__ == "__main__":
+    app()
+
+__all__ = ["app", "fetch_and_upload_ecpds_data", "last_date_of_ecpds_data", "main", "retrieve_data_from_ecpds"]
