@@ -12,9 +12,9 @@ def upload_data_to_s3(*,
                       extension: str,
                       raise_error: bool = False
                       ):
-    """Upload data from the local directory to an S3 bucket.
+    """Upload data from the local directory to an S3 bucket and delete files from the local directory.
 
-    This function uploads data from a local directory to an S3 bucket.
+    This function uploads data from a local directory to an S3 bucket and deletes those files from the local directory.
 
     :param str upload_dir:
         Directory containing the data to upload.
@@ -60,7 +60,6 @@ def upload_data_to_s3(*,
 
     no_files = len([file for file in os.listdir(upload_dir) if file.endswith(extension)])
     logger.info(f"Number of files to upload: {no_files}")
-    succesful_uploads = 0
     failed_uploads = 0
     total_uploads = 0
     for file in os.listdir(upload_dir):
@@ -74,7 +73,6 @@ def upload_data_to_s3(*,
                 logger.info(f"Uploaded {file} to S3 bucket")
                 os.remove(os.path.join(upload_dir, file))
                 logger.info(f"Deleted {file} from local directory")
-                succesful_uploads += 1
             except Exception as e:
                 logger.error(f"Failed to upload {file} to S3 bucket: {e!s}")
                 if raise_error:
@@ -86,7 +84,7 @@ def upload_data_to_s3(*,
 
     if failed_uploads > 0:
         logger.warning(f"Failed to upload {failed_uploads}/{total_uploads} files with ext {extension} Bucket: {Bucket}, Prefix: {Prefix}")
-        return False
+        return failed_uploads
     else:
         logger.info(f"Successfully uploaded all {total_uploads} files with ext {extension} Bucket: {Bucket} Prefix: {Prefix}")
-        return True
+        return failed_uploads
