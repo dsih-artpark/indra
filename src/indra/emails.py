@@ -40,6 +40,8 @@ class Report:
             self.run_date = datetime.now().strftime("%Y%m%d")
         else:
             self.run_date = run_date
+
+        self.email_addresses = [email.split('<')[1].split('>')[0] for email in email_recipients]
         self.email_recipients = ", ".join(email_recipients)
 
 
@@ -125,7 +127,7 @@ class Report:
             logger.info("Connecting to email server")
             server.starttls(context=ssl.create_default_context())
             server.login(self.EMAIL, self.PASSWORD)
-            server.sendmail(self.EMAIL, self.email_recipients, text)
+            server.sendmail(self.EMAIL, self.email_addresses, text)
             logger.info("Email sent successfully")
 
     def any_criticals(self):
