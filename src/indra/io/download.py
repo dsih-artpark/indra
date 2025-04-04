@@ -110,12 +110,12 @@ def download_from_url(url: str, output_dir: str, filename: str,
         path.parent.mkdir(parents=True, exist_ok=True)
 
         total_size = int(response.headers.get('content-length', 0))
-        if chunk and total_size > 2 * chunk_size:
-            chunk = True
-            logger.debug(f"Total size of data is {total_size} bytes. Using chunking.")
-        elif chunk and total_size <= 2 * chunk_size:
+        if chunk and total_size <= 2 * chunk_size:
             chunk = False
             logger.info(f"Total size of data is {total_size} bytes. Overriding chunking as data is less than 2 chunks.")
+        elif not chunk and total_size > 2 * chunk_size:
+            chunk = True
+            logger.info(f"Total size of data is {total_size} bytes. Setting chunk to True as data is greater than 1 chunk.")
 
         if chunk:
             logger.info(f"Writing data to file at path: {path} with chunks of size {chunk_size} bytes.")
