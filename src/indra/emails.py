@@ -14,9 +14,11 @@ from dotenv import load_dotenv
 logger = logging.getLogger(__name__)
 
 class Status(Enum):
-    SUCCESS = 1
-    CRITICAL = 2
-    ERROR = 3
+    NOTE = (0, "Note", "green")
+    SUCCESS = (1, "Success", "green")
+    CRITICAL = (2, "Critical", "red")
+    WARNING = (3, "Warning", "orange")
+    ERROR = (4, "Error", "darkred")
 
 class ReportEntry:
 
@@ -72,29 +74,23 @@ class Report:
         # data = [report._to_list() for report in self.reports]
 
         for report_entry in self.reports:
-            if report_entry.status == Status.SUCCESS:
-                color = 'green'
-            elif report_entry.status == Status.CRITICAL:
-                color = 'red'
-            elif report_entry.status == Status.ERROR:
-                color = 'orange'
 
-            html += f"<tr style='border: 1px solid black; font-size: 18px; color: {color}'>"
+            html += f"<tr style='border: 1px solid black; font-size: 18px; color: {report_entry.status.value[2]}'>"
             html += f"<td style='border: 1px solid black; padding: 10px'>{report_entry.component_name}</td>"
-            html += f"<td style='border: 1px solid black; padding: 10px'>{report_entry.status}</td>"
+            html += f"<td style='border: 1px solid black; padding: 10px'>{report_entry.status.value[1]}</td>"
             html += f"<td style='border: 1px solid black; padding: 10px'>{report_entry.comments}</td>"
             html += "</tr>"
 
         html += "</table></body></html>"
 
         if any([report_entry.status == Status.CRITICAL for report_entry in self.reports]):
-            subject = 'CRITICAL ERROR!! - ' + subject
+            subject = 'CRITICAL ISSUE!! - ' + subject
 
-        if any([report_entry.status == Status.ERROR for report_entry in self.reports]):
+        elif any([report_entry.status == Status.ERROR for report_entry in self.reports]):
             subject = 'Errors raised - ' + subject
 
 
-        self.message["From"] = 'Artpark Automated Pipelines'
+        self.message["From"] = self.job_name + ' Bot'
         self.message["To"] = self.email_recipients
         self.message["Subject"] = subject
         self.message.attach(MIMEText(html,'html'))
@@ -134,3 +130,6 @@ class Report:
 
     def any_criticals(self):
         return any([report.status == Status.CRITICAL for report in self.reports])
+
+    def any_errors(self):
+        return any([report.status == Status.ERROR for report in self.reports])
