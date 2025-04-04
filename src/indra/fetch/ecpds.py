@@ -275,7 +275,7 @@ def main(*,
                             report.add_a_status_report('ECPDS Data Upload', Status.WARNING, message)
 
                     if failed_uploads == 0:
-                        message = f"All {total_files} files uploaded"
+                        message = f"All {total_files} files uploaded successfully"
                         logger.info(message)
                         report.add_a_status_report('ECPDS Data Upload', Status.SUCCESS, message)
                     elif failed_uploads >= 1 and failed_uploads < total_files:
