@@ -1,11 +1,12 @@
 import logging
+import os
+import tempfile
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Optional, Union
+from typing import Annotated, Optional
 
 import typer
 from bs4 import BeautifulSoup
-from requests.exceptions import HTTPError
 
 from indra.emails import Report, Status
 from indra.io import download_from_url, get_params, retry_session, upload_data_to_s3
@@ -15,10 +16,10 @@ logging.captureWarnings(True)
 
 app = typer.Typer()
 
-
+@app.command("latest-date-of-data")
 def last_date_of_ecpds_data(*,
-                          ecpds_url: str = "https://data.ecmwf.int/forecasts/"
-                          ):
+                            base_url: str = "https://data.ecmwf.int/forecasts/"
+                            ):
     """Retrieve the last date of forecast data from ECMWF's ECPDS.
 
     This function retrieves the last date of forecast data from ECMWF's ECPDS based on the specified parameters.
@@ -31,44 +32,45 @@ def last_date_of_ecpds_data(*,
     :returns:
         The last date of forecast data from ECMWF's ECPDS, or None if no valid dates are found.
 
-    :raises HTTPError:
-        If there is an issue with the HTTP request.
-
     **Example:**
 
     ```python
     last_date = last_date_of_ecpds_data()
-    print(f"Last forecast date: {last_date}")
+    print(f"Last forecast date from ECPDS: {last_date}")
     ```
     """
 
-    logger.debug(f"Request URL: {ecpds_url}")
+    logger.debug(f"Request URL: {base_url}")
 
-    session = retry_session(max_retries=10, backoff_factor=0.5)
-    response = session.get(url=ecpds_url, timeout=10)
+    session = retry_session(retries=10)
+    response = session.get(url=base_url, timeout=10)
     if response.status_code != 200:
         logger.error(f"Failed to retrieve the directory: {response.status_code}")
         return None
 
     # Parse the HTML content
     soup = BeautifulSoup(response.text, 'html.parser')
-
-    # Find all links in the directory listing
     links = soup.find_all('a')
 
     # Extract dates from the folder names
     dates = []
     for link in links:
         href = link.get('href')
-        if href and href.endswith('/'):  # Only consider directories
-            try:
-                # Convert the folder name to a date
-                date = datetime.strptime(href.split('/')[2], '%Y%m%d')
-                dates.append(date)
-            except ValueError:
-                continue  # Skip if the format is incorrect
+        if not href or href == 'home' or 'github.com' in href:
+            continue
 
-    # Find the latest date
+        # Extract the date part regardless of path structure
+        date_str = href.strip('/').split('/')[-1]
+
+        try:
+            # Convert the folder name to a date
+            date = datetime.strptime(date_str, '%Y%m%d')
+            dates.append(date)
+        except ValueError:
+            logger.debug(f"Skipping non-date folder: {date_str}")
+            continue
+
+    # Find the latest date if any dates are retrieved
     if dates:
         # Find the maximum date in the list
         max_date = max(dates)
@@ -94,336 +96,215 @@ def last_date_of_ecpds_data(*,
         else:
             return result_date
     else:
-        logger.error("No valid dates found in ECPDS.")
+        logger.error("No valid dates found in ECPDS. Dates returned is empty.")
         return None
 
+def construct_ecpds_urls(*,
+                         date: datetime,
+                         configs: list[dict],
+                         base_url: str = "https://data.ecmwf.int/forecasts/",
+                         ):
+    """Construct the URL for the ECPDS data.
 
-def retrieve_data_from_ecpds(*,
-                             get_latest_date: bool = True,
-                             custom_date: Optional[datetime] = None,
-                             zulu_utc_timestamp: str = "00z",
-                             model: str = "ifs",
-                             resolution: str = "0p25",
-                             forecast_type: str = "oper",
-                             forecast_times: Optional[Union[list, str]] = None,
-                             ecpds_base_url: str = "https://data.ecmwf.int/forecasts",
-                             raise_error: bool = True,
-                             chunk: bool = True,
-                             chunk_size: int = 1048576,
-                             output_dir: str = "~/.dsih-data"
-                             ):
-    """Retrieve operational forecast data from ECMWF's ECPDS.
+    This function constructs the URL for the ECPDS data based on the specified parameters.
 
-    This function retrieves operational forecast data from ECMWF's ECPDS based on the specified parameters.
+    :param datetime date:
+        The date of the forecast data.
 
-    :param bool get_latest_date:
-        Whether to retrieve the latest available forecast data.
-
-        **Default**: ``True``
-
-    :param Optional[datetime] custom_date:
-        The date of the forecast data to retrieve. Ignored if `get_latest_date` is True.
-
-    :param str zulu_utc_timestamp:
-        The zulu UTC timestamp of the forecast data to retrieve.
-
-        **Default**: ``"00z"``
-
-    :param str model:
-        The model to retrieve the forecast data from.
-
-        **Default**: ``"ifs"``
-
-    :param str resolution:
-        The resolution of the forecast data to retrieve.
-
-        **Default**: ``"0p25"``
-
-    :param str forecast_type:
-        The type of forecast data to retrieve.
-
-        **Default**: ``"oper"``
-
-    :param Optional[Union[list, str]] forecast_times:
-        The timestamps of the forecast data to retrieve.
-
-        **Default**: ``["0h", "6h"]``
+    :param list[dict] configs:
+        The configurations of the forecast data to retrieve.
+        Each dictionary contains the following keys:
+        - reference_time: The reference time of the forecast data.
+        - model: The model of the forecast data.
+        - resolution: The resolution of the forecast data.
+        - stream: The stream of the forecast data.
+        - step: The step of the forecast data. String of format "0h", "6h", "12h", etc.
+        - type: The type of the forecast data. "fc" for forecast, "ef" for ensemble forecast.
 
     :param str ecpds_base_url:
         The base URL of the ECPDS.
-
-        **Default**: ``"https://data.ecmwf.int/forecasts"``
-
-    :param bool raise_error:
-        Whether to raise an error if the download fails.
-
-        **Default**: ``True``
-
-    :param bool chunk:
-        Whether to download the file in chunks and show progress.
-
-        **Default**: ``True``
-
-    :param int chunk_size:
-        The size of each chunk in bytes.
-
-        **Default**: ``1048576``
-
-    :param str output_dir:
-        The directory to save the downloaded data.
-
-        **Default**: ``"~/.dsih-data"``
-
-    :returns:
-        True if the data was downloaded successfully, False otherwise.
-
-    :raises HTTPError:
-        If there is an issue with the HTTP request.
-
-    :raises ValueError:
-        If invalid parameters are provided.
-
-    **Example:**
-
-    ```python
-    success = retrieve_data_from_ecpds(
-        get_latest_date=True,
-        forecast_times=["0h", "6h"],
-        output_dir="./ecpds_data"
-    )
-    if success:
-        print("Data retrieved successfully.")
-    ```
     """
-    if forecast_times is None:
-        forecast_times = ["0h", "6h"]
-    if get_latest_date:
-        date = last_date_of_ecpds_data()
-        if date is None:
-            raise ValueError(f"No date found in ECPDS url {ecpds_base_url}.")
-    else:
-        if date is None:
-            raise ValueError("No date provided.")
-        else:
-            logger.error("Custom dates are not yet supported. Raising Error...")
-            raise ValueError("Custom dates are not yet supported.")
-        # This line is for the future. This will allow the user to pass a custom date. It will not be used in the current implementation.
-        date = custom_date
 
-    if model != "ifs":
-        raise ValueError("Only 'ifs' model is currently supported")
-
-    if resolution != "0p25":
-        raise ValueError("Only '0p25' resolution is currently supported")
-
-    if forecast_type != "oper":
-        raise ValueError("Only 'oper' forecast type is currently supported")
-
-    # Convert date string to format needed for URL
     formatted_date = date.strftime("%Y%m%d")
-    formatted_date_with_time = date.strftime("%Y%m%d%H%M%S")
 
-    forecast_times = forecast_times if isinstance(forecast_times, list) else [forecast_times]
-
-    grib_successes = [None] * len(forecast_times)
-    index_successes = [None] * len(forecast_times)
-    for i, forecast_time in enumerate(forecast_times):
-        url = (
-            f"{ecpds_base_url}/{formatted_date}/{zulu_utc_timestamp}/{model}/"
-            f"{resolution}/{forecast_type}/{formatted_date_with_time}-{forecast_time}-{forecast_type}-fc.grib2"
-        )
-        logger.debug(f"Attempting to retrieve data from URL: {url}")
-        filename = f"{formatted_date_with_time}-{forecast_time}-{forecast_type}-fc.grib2"
-        grib_success = download_from_url(url=url,
-                                         output_dir=output_dir,
-                                         filename=filename,
-                                         raise_error=False,
-                                         chunk=chunk,
-                                         chunk_size=chunk_size)
-        if grib_success:
-            index_url = url.replace(".grib2", ".index")
-            index_filename = filename.replace(".grib2", ".index")
-            index_success = download_from_url(url=index_url,
-                                              output_dir=output_dir,
-                                              filename=index_filename,
-                                              raise_error=False,
-                                              chunk=False)
-        if not grib_success:
-            index_success = False
-        grib_successes[i] = grib_success
-        index_successes[i] = index_success
-
-    if all(grib_successes) and all(index_successes):
-        logger.info(f"Successfully retrieved data and index files from ECPDS for date {date}")
-        return True
-    elif raise_error:
-        logger.error(f"Failed to retrieve data and index files from ECPDS for date {date}")
-        raise HTTPError(f"Failed to retrieve data and index files from ECPDS for date {date}")
-    else:
-        logger.warning(f"Failed to retrieve data and index files from ECPDS for date {date}")
-        return False
-
-
-def fetch_and_upload_ecpds_data(*,
-                                yaml_path: Path,
-                                get_latest_date: bool = True,
-                                log_level: str = "DEBUG",
-                                custom_date: Optional[str] = None,
-                                log_filename: Optional[str] = None,
-                                ) -> tuple[bool, int, datetime]:
-    """
-    Process CDS ERA5 daily data
-
-    :param Path yaml_path:
-        The path to the YAML configuration file.
-
-    :param bool get_latest_date:
-        Whether to retrieve the latest available forecast data.
-
-        **Default**: ``True``
-
-    :param Optional[str] custom_date:
-        The date of the forecast data to retrieve. Ignored if `get_latest_date` is True.
-
-    :param Optional[str] log_filename:
-        The filename of the log file.
-    """
-    params = get_params(yaml_path=yaml_path)
-    ecpds_params = params['ecpds']
-    shared_params = params['shared_params']
-
-    latest_date = last_date_of_ecpds_data()
-
-    s3_prefix = f"{ecpds_params['ds_id']}-{ecpds_params['ds_name']}/{ecpds_params['folder_name']}/{latest_date.strftime('%Y')}"
-    local_region_dir = Path(shared_params['local_data_dir']).expanduser() / Path(shared_params['s3_bucket']) / Path(s3_prefix)
-    local_region_dir.mkdir(parents=True, exist_ok=True)
-
-    retrieve_data_from_ecpds(get_latest_date=get_latest_date, custom_date=custom_date, ecpds_base_url=ecpds_params['url'],
-                                            output_dir=local_region_dir, zulu_utc_timestamp=ecpds_params['zulu_utc_timestamp'],
-                                            resolution=ecpds_params['resolution'],
-                                            model=ecpds_params['model'], forecast_type=ecpds_params['forecast_type'],
-                                            forecast_times=ecpds_params['forecast_times'],
-                                            raise_error=ecpds_params['raise_error'], chunk=ecpds_params['chunk'],
-                                            chunk_size=ecpds_params['chunk_size'])
-
-
-    upload_success = [None] * len(ecpds_params['extensions'])
-    no_files = [None] * len(ecpds_params['extensions'])
-
-    for i, extension in enumerate(ecpds_params['extensions']):
-        no_files[i] = len(list(local_region_dir.glob(f"*.{extension}")))
-        upload_success[i] = upload_data_to_s3(upload_dir=local_region_dir, Bucket=shared_params['s3_bucket'],
-                                     Prefix=s3_prefix, extension=extension)
-
-    upload_success = all(upload_success)
-    no_files = sum(no_files)
-
-    return upload_success, no_files, latest_date
-
+    urls = []
+    for config in configs:
+        for each_format in config['format']:
+            url = (
+                f"{base_url}{formatted_date}/{config['reference_time']}z/{config['model']}/"
+                f"{config['resolution']}/{config['stream']}/{formatted_date}{config['reference_time']}0000"
+                f"-{config['step']}-{config['stream']}-{config['type']}.{each_format}"
+            )
+            urls.append(url)
+    return urls
 
 @app.callback(invoke_without_command=True)
-def main(
-    ctx: typer.Context,
-    yaml_path: Annotated[
-        Path,
-        typer.Argument(
-            exists=True,
-            dir_okay=False,
-            resolve_path=True,
-            help="Path to YAML configuration file containing ECPDS parameters"
-        )
-    ],
-    get_latest_date: Annotated[
-        bool,
-        typer.Option(
-            "--get-latest-date/--custom-date",
-            "-g/-c",
-            help="Use current month for date range, or use dates from config"
-        )
-    ] = True,
-    debug: Annotated[
-        bool,
-        typer.Option(
-            "--debug/--no-debug",
-            "-d/-D",
-            help="Enable debug mode, send email without actually downloading data"
-        )
-    ] = False,
-    debug_upload_success: Annotated[
-        bool,
-        typer.Option(
-            "--debug-upload-success/--no-debug-upload-success",
-            "-u/-U",
-            help="When debug mode is enabled, what should the upload_success be set to. If True, run will simulate a successful upload."
-        )
-    ] = False,
-    custom_date: Annotated[
-        Optional[str],
-        typer.Option(
-            "--custom-date",
-            "-c",
-            help="Date to retrieve forecast data for"
-        )
-    ] = None
-) -> None:
-    """
-    Process ECPDS forecast data
-    """
+def main(*,
+         ctx: typer.Context,
+         yaml_path: Annotated[
+            Path,
+            typer.Argument(
+                exists=True,
+                dir_okay=False,
+                resolve_path=True,
+                )
+        ],
+        get_latest_date: Annotated[
+            bool,
+            typer.Option(
+                "--get-latest-date/ ",
+                "-l/ ",
+                help="Use current month for date range, or use dates from config"
+                )
+        ] = True,
+        custom_date: Annotated[
+            Optional[str],
+            typer.Option(
+                "--custom-date",
+                "-c",
+                help="Date to retrieve forecast data for"
+                )
+        ] = None,
+        upload: Annotated[
+            bool,
+            typer.Option(
+                " /--no-upload",
+                " /-N",
+                help="Upload the data to S3. If True, credentials must be set in the environment variables or in ~/.aws/credentials"
+                )
+        ] = True,
+        directory: Annotated[
+            Optional[str],
+            typer.Option(
+                "--directory",
+                "-d",
+                help="Directory to store the data"
+                )
+        ] = None,
+        ) -> None:
+
     parent_config = ctx.obj or {}
-    params = get_params(yaml_path=yaml_path)
-    email_recipients = params['shared_params']['email_recipients']
+    params = get_params(yaml_path)
+    shared_params = params['shared_params']
     ecpds_params = params['ecpds']
 
     report = Report(
         job_name="ECPDS Daily Job",
-        email_recipients=email_recipients
+        email_recipients=shared_params['email_recipients']
     )
-
     try:
-        if not debug:
-            upload_success, no_files, latest_timestamp = fetch_and_upload_ecpds_data(
-                yaml_path=yaml_path,
-                get_latest_date=get_latest_date,
-                custom_date=custom_date,
-                log_level=parent_config.get("log_level", "INFO"),
-                log_filename=parent_config.get("log_file")
-            )
+        while True:
+            # Step 1: Get the latest date of data available
+            if get_latest_date:
+                last_date = last_date_of_ecpds_data(base_url=ecpds_params['url'])
+                if last_date is None:
+                    message = "No valid dates found in ECPDS."
+                    logger.error(message)
+                    report.add_a_status_report('ECPDS Latest Date Retrieval', Status.ERROR, message)
+                    break
+                else:
+                    message = f"Last forecast date from ECPDS: {last_date}"
+                    logger.info(message)
+                    report.add_a_status_report('ECPDS Latest Date Retrieval', Status.SUCCESS, message)
+            else:
+                message = "Custom dates are not yet supported."
+                logger.error(message)
+                report.add_a_status_report('ECPDS Data Retrieval', Status.CRITICAL, message)
+                break
 
-        else:
-            upload_success = debug_upload_success
-            no_files = 0
-            latest_timestamp = datetime.now()
+            # Step 2: Get the data for the latest date
+            urls = construct_ecpds_urls(base_url=ecpds_params['url'], date=last_date, configs=ecpds_params['configs'])
+            if directory is None:
+                logger.info("Using a temporary directory to store the data")
+                directory = tempfile.TemporaryDirectory().name # Named temporary directory
+            else:
+                logger.info(f"Using the directory {directory} to store the data")
 
-        dataset_name = ecpds_params['ds_name'].replace('_', ' ')
-        dataset_source = ecpds_params['ds_source']
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for url in urls:
+                filename = url.split('/')[-1]
+                filepath = os.path.join(directory, filename)
+                os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                logger.info(f"Downloading {url} to {filepath}")
+                try:
+                    download_success = download_from_url(url=url, output_dir=directory, filename=filename, raise_error=ecpds_params['raise_error'])
+                    if not download_success:
+                        message = f"Downloading {url} failed"
+                        logger.error(message)
+                        report.add_a_status_report('ECPDS Data Retrieval', Status.ERROR, message)
+                        continue
+                except Exception as e:
+                    message = f"Downloading {url} failed: {e}"
+                    logger.error(message)
+                    report.add_a_status_report('ECPDS Data Retrieval', Status.ERROR, message)
 
-        if upload_success:
-            message = (
-                f"All {no_files} files obtained from {dataset_name} "
-                f"on {dataset_source} have been successfully uploaded to S3 on {current_date}.\n"
-                f"The last timestamp of data availability for {dataset_name} is {latest_timestamp} UTC, "
-                f"when checked at approximately {current_timestamp} UTC."
-            )
-            report.add_a_status_report('ECPDS Upload', Status.SUCCESS, message)
-        else:
-            message = (
-                    f"One or more files from {dataset_name} "
-                    f"on {dataset_source} have failed to upload to S3 on {current_date}.\n"
-                    f"The last timestamp of data availability for {dataset_name} is {latest_timestamp} UTC, "
-                    f"when checked at approximately {current_timestamp} UTC.\n"
-                    f"Detailed health of the run can be found in the attached debug log file."
-                )
-            report.add_a_status_report('ECPDS Upload', Status.ERROR, message)
+            no_files_downloaded = sum([1 for url in urls if os.path.exists(os.path.join(directory, url.split('/')[-1]))])
+            if no_files_downloaded == len(urls):
+                message = f"All {len(urls)} files downloaded successfully"
+                logger.info(message)
+                report.add_a_status_report('ECPDS Data Retrieval', Status.SUCCESS, message)
+            elif no_files_downloaded >= 1:
+                message = f"Only {no_files_downloaded} out of {len(urls)} files downloaded"
+                logger.error(message)
+                report.add_a_status_report('ECPDS Data Retrieval', Status.ERROR, message)
+            else:
+                message = f"Download of all {len(urls)} files failed"
+                logger.error(message)
+                report.add_a_status_report('ECPDS Data Retrieval', Status.CRITICAL, message)
+
+            if upload:
+                logger.info("Uploading the data to S3")
+                if report.any_criticals():
+                    message = ("Uploading the data to S3 failed because of critical errors at "/
+                            "the data retrieval step.")
+                    logger.error(message)
+                    report.add_a_status_report('ECPDS Data Upload', Status.CRITICAL, message)
+                    break
+                else:
+                    s3_prefix = f"{ecpds_params['ds_id']}-{ecpds_params['ds_name']}/trial/"
+                    total_files = 0
+                    failed_uploads = 0
+                    for each_format in ecpds_params['extensions']:
+                        if len(list(Path(directory).glob(f"*.{each_format}"))) > 0:
+                            total_files += len(list(Path(directory).glob(f"*.{each_format}")))
+                            failed_uploads += upload_data_to_s3(upload_dir=directory, Bucket=shared_params['s3_bucket'],
+                                                    Prefix=s3_prefix, extension=each_format,
+                                                    raise_error=ecpds_params['raise_error'])
+                        else:
+                            message = f"No files found for {each_format}"
+                            logger.warning(message)
+                            report.add_a_status_report('ECPDS Data Upload', Status.WARNING, message)
+
+                    if failed_uploads == 0:
+                        message = f"All {total_files} files uploaded"
+                        logger.info(message)
+                        report.add_a_status_report('ECPDS Data Upload', Status.SUCCESS, message)
+                    elif failed_uploads >= 1 and failed_uploads < total_files:
+                        message = f" Only {total_files - failed_uploads} out of {total_files} files uploaded"
+                        logger.error(message)
+                        report.add_a_status_report('ECPDS Data Upload', Status.ERROR, message)
+                    else:
+                        message = f"Upload of all {total_files} files failed"
+                        logger.error(message)
+                        report.add_a_status_report('ECPDS Data Upload', Status.CRITICAL, message)
+                break
+            else:
+                message = "Skipping the upload of the data to S3"
+                logger.info(message)
+                report.add_a_status_report('ECPDS Data Upload', Status.NOTE, message)
+                break
+
+        # Add attachments to the report if there are any critical or error reports
+        if report.any_criticals() or report.any_errors():
+            report.add_attachment(f"logs/{parent_config.get('log_file')}")
     except Exception as e:
-        report.add_a_status_report('General', Status.CRITICAL, f'Exception raised: {e}')
+        message = f'Exception raised, check the attached log file for more details: {e}'
+        logger.error(message)
+        report.add_a_status_report('Unexpected Error', Status.CRITICAL, message)
+        report.add_attachment(f"logs/{parent_config.get('log_file')}")
     finally:
-        if report.any_criticals():
-            report.add_attachment(f'logs/{parent_config.get("log_file")}')
         report.send_email()
 
 if __name__ == "__main__":
     app()
 
-__all__ = ["app", "fetch_and_upload_ecpds_data", "last_date_of_ecpds_data", "main", "retrieve_data_from_ecpds"]
+__all__ = ["app", "construct_ecpds_urls", "last_date_of_ecpds_data", "main"]
