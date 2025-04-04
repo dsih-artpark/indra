@@ -146,3 +146,5 @@ dmypy.json
 *.yaml
 !example.yaml
 !example.env
+src/indra/fetch/ecpds.deprecated.py
+ecpds_link_counts.py
