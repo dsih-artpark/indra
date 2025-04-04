@@ -260,7 +260,7 @@ def main(*,
                     report.add_a_status_report('ECPDS Data Upload', Status.CRITICAL, message)
                     break
                 else:
-                    s3_prefix = f"{ecpds_params['ds_id']}-{ecpds_params['ds_name']}/trial/"
+                    s3_prefix = f"{ecpds_params['ds_id']}-{ecpds_params['ds_name']}/{ecpds_params['ds_folder_name']}"
                     total_files = 0
                     failed_uploads = 0
                     for each_format in ecpds_params['extensions']:
