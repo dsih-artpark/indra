@@ -200,7 +200,7 @@ def main(*,
                 if last_date is None:
                     message = "No valid dates found in ECPDS."
                     logger.error(message)
-                    report.add_a_status_report('ECPDS Latest Date Retrieval', Status.ERROR, message)
+                    report.add_a_status_report('ECPDS Latest Date Retrieval', Status.CRITICAL, message)
                     break
                 else:
                     message = f"Last forecast date from ECPDS: {last_date}"
