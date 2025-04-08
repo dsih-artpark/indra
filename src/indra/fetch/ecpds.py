@@ -226,7 +226,8 @@ def main(*,
                 os.makedirs(os.path.dirname(filepath), exist_ok=True)
                 logger.info(f"Downloading {url} to {filepath}")
                 try:
-                    download_success = download_from_url(url=url, output_dir=directory, filename=filename, raise_error=ecpds_params['raise_error'])
+                    download_success = download_from_url(url=url, output_dir=directory, filename=filename,
+                                                         raise_error=ecpds_params['raise_error'])
                     if not download_success:
                         message = f"Downloading {url} failed"
                         logger.error(message)
