@@ -24,6 +24,11 @@ python-dotenv = "^1.0.1"
 [tool.poetry.group.dev.dependencies]
 ipython = "^9.0.2"
 
+[tool.poetry.group.test.dependencies]
+pytest = "^8.3.5"
+pytest-mock = "^3.14.0"
+pytest-cov = "^6.1.1"
+
 
 [tool.poetry.group.docs.dependencies]
 sphinx = "^8.2.3"
@@ -48,3 +53,10 @@ select = ["E", "F", "W", "I", "FLY", "RUF", "B", "ICN"]
 [tool.ruff]
 line-length = 140
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=indra --cov-report=term-missing"
+filterwarnings = [
+    "ignore:The NumPy module was reloaded:UserWarning",
+    # Add other warning filters as needed
+]
