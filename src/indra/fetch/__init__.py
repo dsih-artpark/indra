@@ -3,7 +3,7 @@ from indra.fetch.cds import check_cds_credentials, fetch_and_upload_cds_data, la
 from indra.fetch.ecpds import app as ecpds_app
 from indra.fetch.ecpds import construct_ecpds_urls, last_date_of_ecpds_data
 from indra.fetch.imd import app as imd_app
-from indra.fetch.imd import clean_imd_data, retrieve_live_data_from_imd
+from indra.fetch.imd import clean_imd_data
 
 __all__ = [
     "cds_app",
@@ -16,6 +16,4 @@ __all__ = [
     "last_date_of_cds_data",
     "last_date_of_ecpds_data",
     "retrieve_data_from_cds",
-    "retrieve_data_from_ecpds",
-    "retrieve_live_data_from_imd"
-]
+    "retrieve_data_from_ecpds"]
