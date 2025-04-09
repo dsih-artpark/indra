@@ -106,8 +106,10 @@ class Report:
                 part.set_payload(attachment.read())
 
             encoders.encode_base64(part)
-
-            attachment_name = filepath.split('/')[-1]
+            if "/" in filepath:
+                attachment_name = filepath.split("/")[-1]
+            else:
+                attachment_name = filepath
             part.add_header(
                 "Content-Disposition",
                 f"attachment; filename= {attachment_name}",
