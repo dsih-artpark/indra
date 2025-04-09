@@ -1,13 +1,14 @@
 import io
 import logging
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
 
 import pandas as pd
 import typer
-from requests.exceptions import HTTPError
 
+from indra.emails import Report, Status
 from indra.io import get_params, retry_session, upload_data_to_s3
 
 logger = logging.getLogger(__name__)
@@ -109,86 +110,8 @@ def clean_imd_data(df: pd.DataFrame, datacode: str, live=False) -> pd.DataFrame:
 
     return df
 
-def retrieve_live_data_from_imd(datacode: str, timecode: str, params: dict):
-    """Retrieve live data from the Indian Meteorological Department (IMD).
-
-    This function fetches live data from the IMD using the specified URL and data code.
-
-    :param str url:
-        The URL to download the data from.
-
-    :param str datacode:
-        The data code for the specific dataset.
-
-    :return:
-        The path to the downloaded data.
-
-    :raises HTTPError:
-        If there is an issue with the HTTP request, and the status code is not 200.
-
-    **Example:**
-
-    This function is used to retrieve live data from the IMD. You need to find the correct URL & datacode for the data you want to retrieve.
-    The function will only work if your IP address is whitelisted by the IMD, otherwise you will get a 403 error.
-    For example, to retrieve live data for the IMD station data, you can use the following URL and datacode:
-    URL: https://mausam.imd.gov.in/api/current_wx_api.php
-    datacode: C_WX
-
-    ```python
-    retrieve_live_data_from_imd(
-        url="https://mausam.imd.gov.in/api/current_wx_api.php",
-        datacode="C_WX"
-    )
-    ```
-    """
-
-    shared_params = params['shared_params']
-    imd_params = params[datacode]
-    logger.debug(f"Requesting Data Code: {datacode}")
-    url = imd_params['url']
-    logger.debug(f"Request URL: {url}")
-
-    logger.debug(f"Request timecode: {timecode}")
-    logger.debug(f"Current Date and Time: {datetime.now()}")
-    logger.info(f"Initating Download of {datacode} Data")
-    session = retry_session(retries=3)
-    response = session.get(url, timeout=10)  # Timeout after 10 seconds
-    logger.debug(f"Response status code: {response.status_code}")
-
-    shared_params = params['shared_params']
-    imd_params = params[datacode] # Params for the specific IMD dataset
-
-    # Check if the response status code is 200 (OK)
-    if response.status_code == 200:
-        logger.info(f"Data downloaded successfully from {url}")
-        df = clean_imd_data(pd.read_json(io.StringIO(response.text)), live=True, datacode=datacode)
-        logger.info("Data cleaned successfully")
-
-        # Save the data to a CSV file
-        timecode = datetime.strptime(timecode, "%Y-%m-%dT%H:%M:%S")
-        date = timecode.strftime("%Y_%m_%d")
-        time = timecode.strftime("%H_%M_%S")
-
-        # Setting S3 Prefix
-        s3_prefix = f"{imd_params['ds_id']}-{imd_params['ds_name']}/{imd_params['folder_name']}/{date}"
-        output_dir = Path(shared_params['local_data_dir']).expanduser() / Path(shared_params['s3_bucket']) / Path(s3_prefix)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        df.to_csv(output_dir / f"{time}.csv", index=False)
-        logger.debug(f"Data saved to {output_dir / f'{time}.csv'}")
-
-        # Upload the data to S3
-        success = upload_data_to_s3(upload_dir=output_dir, Bucket=shared_params['s3_bucket'],
-                                    Prefix=s3_prefix, extension=imd_params['extension'])
-        if success:
-            logger.debug(f"Data uploaded to {s3_prefix}")
-        else:
-            logger.error(f"Failed to upload data to {s3_prefix}")
-    else:
-        logger.error(f"Failed to download data from {url}. HTTP Status code: {response.status_code}")
-        raise HTTPError(f"Failed to download data from {url}. HTTP Status code: {response.status_code}")
-
 @app.callback(invoke_without_command=True)
-def main(
+def main(*,
     ctx: typer.Context,
     yaml_path: Annotated[
         Path,
@@ -207,18 +130,167 @@ def main(
             help="Enable debug mode, send email without actually downloading data"
         )
     ] = False,
-    timecode: Annotated[
+    directory: Annotated[
         Optional[str],
         typer.Option(
-            "--timecode",
-            "-t",
-            help="Timecode to retrieve data for"
+            "--directory",
+            "-d",
+            help="Directory to store the data"
+            )
+    ] = None,
+    run_summary_path: Annotated[
+        Optional[str],
+        typer.Option(
+            "--run-summary-path",
+            "-r",
+            help="Path to the run summary file"
         )
-    ] = None
-) -> None:
+    ] = None,
+    email: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--email",
+            "-e",
+            help="Send email with the run summary"
+        )
+    ] = False,
+    ) -> None:
+
+    parent_config = ctx.obj or {}
+    # Read the YAML file with params
+
+    if run_summary_path is None:
+        run_summary_path = Path.cwd() / f"run_summary_imd_{datetime.now().strftime('%Y_%m_%d')}.csv"
     params = get_params(yaml_path)
-    if timecode is None:
-        timecode = datetime.now().strftime("%Y-%m-%dT%H:00:00")
-    for datacode in params.keys():
-        if datacode.startswith("imd_"):
-            retrieve_live_data_from_imd(datacode=datacode, timecode=timecode, params=params)
+    shared_params = params['shared_params']
+
+    lines = []
+    try:
+        while True:
+            # Define timecode to be the 0th minute of the current hour
+            timecode = datetime.strptime(datetime.now().strftime("%Y-%m-%dT%H:00:00"),"%Y-%m-%dT%H:%M:%S")
+            logger.debug(f"Timecode: {timecode}")
+            if directory is None:
+                logger.info("Using a Named Temporary Directory to store the data")
+                directory = tempfile.TemporaryDirectory().name
+            else:
+                logger.info(f"Using the directory {directory} to store the data")
+
+            logger.debug(f"Request timecode: {timecode}")
+            date = timecode.strftime("%Y_%m_%d")
+            time = timecode.strftime("%H_%M_%S")
+
+            # Iterate over both datacodes
+            for datacode in params.keys():
+                if datacode.startswith("imd_"):
+
+                    # Counting the number of files downloaded and uploaded
+                    download = 0
+                    upload = 0
+
+                    imd_params = params[datacode]
+                    logger.debug(f"Requesting Data Code: {datacode}")
+                    url = imd_params['url']
+                    logger.debug(f"Request URL: {url}")
+
+
+                    folder = Path(directory) / f"{datacode.removeprefix('imd_')}"
+                    filepath = folder / f"{time}.csv"
+                    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+                    logger.info(f"Downloading {datacode} to {filepath}")
+                    session = retry_session(retries=3)
+                    response = session.get(url, timeout=10)
+                    logger.debug(f"Response status code: {response.status_code}")
+                    # Check if the response status code is 200 (OK)
+                    if response.status_code == 200:
+                        logger.info(f"Data downloaded successfully from {url}")
+                        df = clean_imd_data(pd.read_json(io.StringIO(response.text)), live=True, datacode=datacode)
+                        logger.info("Data cleaned successfully")
+                        df.to_csv(filepath, index=False)
+                        logger.debug(f"Data saved to {filepath}.csv")
+                        download = 1
+                        pass
+                    else:
+                        message = f"Downloading {datacode} failed due to status code {response.status_code}"
+                        logger.error(message)
+                        continue
+
+                    s3_prefix = f"{imd_params['ds_id']}-{imd_params['ds_name']}/{imd_params['folder_name']}/{date}"
+                    failed_uploads = upload_data_to_s3(upload_dir=folder, Bucket=shared_params['s3_bucket'],
+                                    Prefix=s3_prefix, extension=imd_params['extension'], raise_error=imd_params['raise_error'])
+                    if failed_uploads == 0:
+                        logger.info(f"Data uploaded to {s3_prefix}")
+                        upload = 1
+                    else:
+                        logger.error(f"Failed to upload data to {s3_prefix}")
+                    lines.append(f"{timecode},{datacode.removeprefix('imd_')},{download},{upload}")
+            break
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+    finally:
+        with open(run_summary_path, "r") as f:
+            length = len(f.readlines())
+
+        if length == 0 and len(lines) > 0:
+            with open(run_summary_path, "w") as f:
+                f.write("timecode,datacode,download,upload\n")
+                f.write("\n".join(lines))
+        elif length > 0 and len(lines) > 0:
+            with open(run_summary_path, "a") as f:
+                f.write("\n")
+                f.write("\n".join(lines))
+        else:
+            logger.error("No data was downloaded or uploaded")
+
+        if timecode.hour == 23 or email:
+            logger.info("Timecode: %s", timecode)
+            logger.info("Sending email...")
+            report = Report(
+                job_name="IMD Daily Job",
+                email_recipients=shared_params['email_recipients']
+            )
+            df = pd.read_csv(run_summary_path)
+
+            expected_files = len(df)
+
+            download_success = df['download'].sum()
+            upload_success = df['upload'].sum()
+
+            if download_success == 0:
+                message = f"None of the {expected_files} files were downloaded"
+                logger.error(message)
+                report.add_a_status_report('IMD Data Download', Status.CRITICAL, message)
+            elif expected_files > download_success > 0:
+                message = f"Only {download_success} out of {expected_files} files were downloaded"
+                logger.error(message)
+                report.add_a_status_report('IMD Data Download', Status.ERROR, message)
+            else:
+                message = f"All {expected_files} files were downloaded"
+                logger.info(message)
+                report.add_a_status_report('IMD Data Download', Status.SUCCESS, message)
+
+            if upload_success == 0:
+                message = f"None of the {expected_files} files were uploaded"
+                logger.error(message)
+                report.add_a_status_report('IMD Data Upload', Status.CRITICAL, message)
+            elif expected_files > upload_success > 0:
+                if upload_success == download_success:
+                    message = f"All {upload_success} files among the {download_success} downloaded files were uploaded"
+                    logger.info(message)
+                    report.add_a_status_report('IMD Data Upload', Status.SUCCESS, message)
+                else:
+                    message = f"Only {upload_success} out of {download_success} files were uploaded"
+                    logger.error(message)
+                    report.add_a_status_report('IMD Data Upload', Status.ERROR, message)
+            else:
+                message = f"All {expected_files} files were uploaded"
+                logger.info(message)
+                report.add_a_status_report('IMD Data Upload', Status.SUCCESS, message)
+
+            if report.any_criticals() or report.any_errors():
+                report.add_attachment(str(run_summary_path))
+                report.add_attachment(f"logs/{parent_config.get('log_file')}")
+
+            report.send_email()
+
