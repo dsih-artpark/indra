@@ -229,14 +229,10 @@ def main(*,
     except Exception as e:
         logger.error(f"An error occurred: {e}")
     finally:
-        with open(run_summary_path, "r") as f:
-            length = len(f.readlines())
-
-        if length == 0 and len(lines) > 0:
+        if not run_summary_path.exists():
             with open(run_summary_path, "w") as f:
-                f.write("timecode,datacode,download,upload\n")
-                f.write("\n".join(lines))
-        elif length > 0 and len(lines) > 0:
+                f.write("timecode,datacode,download,upload")
+        if len(lines) > 0:
             with open(run_summary_path, "a") as f:
                 f.write("\n")
                 f.write("\n".join(lines))
