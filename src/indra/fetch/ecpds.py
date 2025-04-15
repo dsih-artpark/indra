@@ -124,8 +124,11 @@ def construct_ecpds_urls(*,
     :param str ecpds_base_url:
         The base URL of the ECPDS.
     """
+    try:
+        formatted_date = date.strftime("%Y%m%d")
+    except AttributeError:
+        raise ValueError("Invalid date format: expected a datetime object") from None
 
-    formatted_date = date.strftime("%Y%m%d")
     if not base_url.endswith('/'):
         base_url += '/'
 
