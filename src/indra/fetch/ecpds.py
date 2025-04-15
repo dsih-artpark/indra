@@ -126,6 +126,8 @@ def construct_ecpds_urls(*,
     """
 
     formatted_date = date.strftime("%Y%m%d")
+    if not base_url.endswith('/'):
+        base_url += '/'
 
     urls = []
     for config in configs:
