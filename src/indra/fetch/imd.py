@@ -197,33 +197,46 @@ def main(*,
                     folder = Path(directory) / f"{datacode.removeprefix('imd_')}"
                     filepath = folder / f"{time}.csv"
                     filepath.parent.mkdir(parents=True, exist_ok=True)
-
-                    logger.info(f"Downloading {datacode} to {filepath}")
-                    session = retry_session(retries=3)
-                    response = session.get(url, timeout=10)
-                    logger.debug(f"Response status code: {response.status_code}")
-                    # Check if the response status code is 200 (OK)
-                    if response.status_code == 200:
-                        logger.info(f"Data downloaded successfully from {url}")
-                        df = clean_imd_data(pd.read_json(io.StringIO(response.text)), live=True, datacode=datacode)
-                        logger.info("Data cleaned successfully")
-                        df.to_csv(filepath, index=False)
-                        logger.debug(f"Data saved to {filepath}.csv")
-                        download = 1
-                        pass
-                    else:
-                        message = f"Downloading {datacode} failed due to status code {response.status_code}"
-                        logger.error(message)
-                        continue
-
+                    try:
+                        logger.info(f"Downloading {datacode} to {filepath}")
+                        session = retry_session(retries=3)
+                        response = session.get(url, timeout=20)
+                        logger.debug(f"Response status code: {response.status_code}")
+                        # Check if the response status code is 200 (OK)
+                        if response.status_code == 200:
+                            logger.info(f"Data downloaded successfully from {url}")
+                            df = clean_imd_data(pd.read_json(io.StringIO(response.text)), live=True, datacode=datacode)
+                            logger.info("Data cleaned successfully")
+                            df.to_csv(filepath, index=False)
+                            logger.debug(f"Data saved to {filepath}.csv")
+                            download = 1
+                            pass
+                        else:
+                            message = f"Downloading {datacode} failed due to status code {response.status_code} "
+                            logger.error(message)
+                    except Exception as e:
+                        logger.error(f"Error downloading {datacode}: {e}")
+                    #upload the data to S3
                     s3_prefix = f"{imd_params['ds_id']}-{imd_params['ds_name']}/{imd_params['folder_name']}/{date}"
-                    failed_uploads = upload_data_to_s3(upload_dir=folder, Bucket=shared_params['s3_bucket'],
-                                    Prefix=s3_prefix, extension=imd_params['extension'], raise_error=imd_params['raise_error'])
-                    if failed_uploads == 0:
-                        logger.info(f"Data uploaded to {s3_prefix}")
-                        upload = 1
+                    if download ==0:
+                        logger.info(f"no file to upload to {s3_prefix}")
+                        upload = 0
+                        critical_report = Report(
+                            job_name="IMD Daily Job",
+                            email_recipients=shared_params['email_recipients']
+                        )
+                        message = f"Downloading {datacode} failed and hence no files to upload to S3"
+                        critical_report.add_a_status_report('IMD Data Retrieval', Status.CRITICAL, message)
+                        critical_report.add_attachment(f"logs/{parent_config.get('log_file')}")
+                        critical_report.send_email()
                     else:
-                        logger.error(f"Failed to upload data to {s3_prefix}")
+                        failed_uploads = upload_data_to_s3(upload_dir=folder, Bucket=shared_params['s3_bucket'],
+                                        Prefix=s3_prefix, extension=imd_params['extension'], raise_error=imd_params['raise_error'])
+                        if failed_uploads == 0:
+                            logger.info(f"Uploaded data to {s3_prefix}")
+                            upload = 1
+                        else:
+                            logger.error(f"Failed to upload data to {s3_prefix}")
                     lines.append(f"{timecode},{datacode.removeprefix('imd_')},{download},{upload}")
             break
     except Exception as e:
@@ -289,4 +302,3 @@ def main(*,
                 report.add_attachment(f"logs/{parent_config.get('log_file')}")
 
             report.send_email()
-
