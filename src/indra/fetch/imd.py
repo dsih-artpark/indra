@@ -118,11 +118,14 @@ def main(
     directory: Annotated[Optional[str], typer.Option("--directory", "-d", help="Directory to store the data")] = None,
     run_summary_path: Annotated[Optional[str], typer.Option("--run-summary-path", "-r", help="Path to the run summary file")] = None,
     email: Annotated[Optional[bool], typer.Option("--email", "-e", help="Send email with the run summary")] = False,
+    download_frequency: Annotated[Optional[str], typer.Option("--download-frequency", "-f", help="Download frequency")] = "hourly",
 ) -> None:
     parent_config = ctx.obj or {}
 
     if run_summary_path is None:
-        run_summary_path = Path.cwd() / f"run_summary_imd_{datetime.now().strftime('%Y_%m_%d')}.csv"
+        run_summary_path = Path.cwd() / f"run_summaries/{download_frequency}/imd_{datetime.now().strftime('%Y_%m_%d')}.csv"
+
+    run_summary_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Read the YAML file with params
     params = get_params(yaml_path)
@@ -134,7 +137,27 @@ def main(
     try:
         while True:
             # Define timecode to be the 0th minute of the current hour
-            timecode = datetime.strptime(datetime.now().strftime("%Y-%m-%dT%H:00:00"), "%Y-%m-%dT%H:%M:%S")
+            if download_frequency == "hourly":
+                timecode = datetime.strptime(datetime.now().strftime("%Y-%m-%dT%H:00:00"), "%Y-%m-%dT%H:%M:%S")
+                version = "v1_hourly"
+            elif download_frequency == "15mins":
+                current_minute = datetime.now().minute
+                version = "v2_15min_firehose"
+                if 0 <= current_minute < 15:
+                    timecode = datetime.strptime(datetime.now().strftime("%Y-%m-%dT%H:00:00"), "%Y-%m-%dT%H:%M:%S")
+                elif 15 <= current_minute < 30:
+                    timecode = datetime.strptime(datetime.now().strftime("%Y-%m-%dT%H:15:00"), "%Y-%m-%dT%H:%M:%S")
+                elif 30 <= current_minute < 45:
+                    timecode = datetime.strptime(datetime.now().strftime("%Y-%m-%dT%H:30:00"), "%Y-%m-%dT%H:%M:%S")
+                else:
+                    timecode = datetime.strptime(datetime.now().strftime("%Y-%m-%dT%H:45:00"), "%Y-%m-%dT%H:%M:%S")
+            else:
+                if params["shared_params"]["raise_error"]:
+                    raise ValueError("Invalid download frequency")
+                else:
+                    logger.error("Invalid download frequency, using hourly")
+                    version = "v1_hourly"
+                    timecode = datetime.strptime(datetime.now().strftime("%Y-%m-%dT%H:00:00"), "%Y-%m-%dT%H:%M:%S")
             logger.debug(f"Timecode: {timecode}")
             if directory is None:
                 logger.info("Using a Named Temporary Directory to store the data")
@@ -180,7 +203,7 @@ def main(
                 except Exception as e:
                     logger.error(f"Error downloading {datacode} for {timecode}: {e}")
                 # upload the data to S3
-                s3_prefix = f"{imd_params['ds_id']}-{imd_params['ds_name']}/{imd_params['folder_name']}/{date}"
+                s3_prefix = f"{imd_params['ds_id']}-{imd_params['ds_name']}/{imd_params[version]['folder_name']}/{date}"
                 if no_downloads == 0:
                     logger.info(f"no file to upload to {s3_prefix}")
                     critical_report = Report(job_name="IMD Daily Job", email_recipients=shared_params["email_recipients"])
