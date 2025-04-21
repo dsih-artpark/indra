@@ -207,6 +207,7 @@ def main(*,
             logger.error(message)
             raise ValueError(message)
 
+
     report = Report(
         job_name="ECPDS Daily Job",
         email_recipients=shared_params['email_recipients']
