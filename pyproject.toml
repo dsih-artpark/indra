@@ -23,6 +23,7 @@ python-dotenv = "^1.0.1"
 
 [tool.poetry.group.dev.dependencies]
 ipython = "^9.0.2"
+moto = "^4.0"
 
 [tool.poetry.group.test.dependencies]
 pytest = "^8.3.5"
