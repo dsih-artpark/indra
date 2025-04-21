@@ -192,6 +192,20 @@ def main(*,
     params = get_params(yaml_path)
     shared_params = params['shared_params']
     ecpds_params = params['ecpds']
+    #check if required ecpds_params are present
+    required_params = ['url', 'ds_id', 'ds_name', 'ds_folder_name', 'configs', 'extensions']
+    for param in required_params:
+        if param not in ecpds_params:
+            message = f"Missing required parameter: {param}"
+            logger.error(message)
+            raise ValueError(message)
+    #check if required shared_params are present
+    required_shared_params = ['s3_bucket', 'email_recipients']
+    for param in required_shared_params:
+        if param not in shared_params:
+            message = f"Missing required parameter: {param}"
+            logger.error(message)
+            raise ValueError(message)
 
     report = Report(
         job_name="ECPDS Daily Job",
@@ -260,7 +274,7 @@ def main(*,
             if upload:
                 logger.info("Uploading the data to S3")
                 if report.any_criticals():
-                    message = ("Uploading the data to S3 failed because of critical errors at "/
+                    message = ("Uploading the data to S3 failed because of critical errors at "
                             "the data retrieval step.")
                     logger.error(message)
                     report.add_a_status_report('ECPDS Data Upload', Status.CRITICAL, message)
