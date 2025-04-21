@@ -1,13 +1,18 @@
+import os
+import tempfile
 from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock, Mock, patch
 
+import boto3
 import pytest
 import yaml
+from moto import mock_aws
 from typer.testing import CliRunner
 
 from indra.emails import Report, Status
-from indra.fetch.ecpds import app, construct_ecpds_urls, last_date_of_ecpds_data, main
+from indra.fetch.ecpds import app, construct_ecpds_urls, last_date_of_ecpds_data, main, upload_data_to_s3
 
 runner = CliRunner()
 
@@ -133,7 +138,7 @@ def mock_yaml_path(tmp_path):
     yaml_file = tmp_path / "config.yaml"
     config_data = {
         'shared_params': {
-            'email_recipients': ["test@example.com"],
+            'email_recipients': ["Test User <test@example.com>"],
             's3_bucket': "test-bucket"
         },
         'ecpds': {
@@ -168,11 +173,20 @@ def mock_ctx():
 
 @pytest.fixture
 def mock_report():
-    mock = MagicMock()
-    mock.add_a_status_report = MagicMock()
-    mock.send_email = MagicMock()
+    mock = MagicMock(spec=Report)
     return mock
 
+@pytest.fixture
+def s3_setup():
+    """Fixture to set up and tear down mock S3 bucket."""
+    with mock_aws():
+        # Set up S3 client
+        s3_client = boto3.client('s3', region_name='us-east-1')
+        # Create a mock S3 bucket
+        s3_client.create_bucket(Bucket='test-bucket')
+
+        yield s3_client  # Yield the S3 client for the test
+        # The S3 client will automatically be cleaned up after the test due to mock_s3()
 @pytest.fixture
 def integration_setup(mock_yaml_path, tmp_path):
     # Setup for integration tests: create directories, a mock file, and return needed paths
@@ -544,11 +558,10 @@ def test_file_download_verification(mock_ctx, mock_yaml_path, mock_report):
 
         mock_exists.assert_called()
 
-
 @pytest.mark.integration
 def test_email_reporting_integration(mock_ctx, integration_setup, mock_report):
     mock_yaml_path, test_dir, test_file = integration_setup
-
+    """Test email reporting in case of success"""
     with patch('indra.fetch.ecpds.last_date_of_ecpds_data', return_value=datetime(2024, 1, 1)), \
          patch('indra.fetch.ecpds.construct_ecpds_urls', return_value=[str(test_file)]), \
          patch('indra.fetch.ecpds.download_from_url', return_value=True), \
@@ -562,3 +575,314 @@ def test_email_reporting_integration(mock_ctx, integration_setup, mock_report):
 
         main(ctx=mock_ctx, yaml_path=mock_yaml_path, get_latest_date=True, custom_date=None, upload=True, directory=str(test_dir))
         mock_report.send_email.assert_called_once()
+
+def test_email_reporting_integration_failure(mock_ctx, integration_setup, mock_report):
+    """Test email reporting in case of failure"""
+    mock_yaml_path, test_dir, test_file = integration_setup
+
+    with patch('indra.fetch.ecpds.last_date_of_ecpds_data', return_value=datetime(2024, 1, 1)), \
+         patch('indra.fetch.ecpds.construct_ecpds_urls', return_value=[str(test_file)]), \
+         patch('indra.fetch.ecpds.download_from_url', return_value=False), \
+         patch('indra.fetch.ecpds.upload_data_to_s3', return_value=0), \
+         patch('indra.fetch.ecpds.tempfile.TemporaryDirectory') as mock_tempdir, \
+         patch('indra.fetch.ecpds.Report') as MockReport:
+
+        mock_tempdir.return_value.__enter__.return_value = str(test_dir)
+        mock_report.send_email = MagicMock()
+        MockReport.return_value = mock_report
+
+        main(ctx=mock_ctx, yaml_path=mock_yaml_path, get_latest_date=True, custom_date=None, upload=True, directory=str(test_dir))
+        mock_report.send_email.assert_called_once()
+
+
+def test_missing_key_shared_params(mock_ctx, mock_yaml_path):
+    """ Test that the main function raises an error if 'shared_params' is missing in the YAML file."""
+    with open(mock_yaml_path, 'r') as f:
+        config_data = yaml.safe_load(f)
+
+    # Remove the 'shared_params' section to simulate a missing key
+    del config_data['shared_params']
+
+    with open(mock_yaml_path, 'w') as f:
+        yaml.dump(config_data, f)
+
+    # Run the main function and check for errors
+    with pytest.raises(KeyError, match='shared_params'):
+        main(ctx=mock_ctx, yaml_path=mock_yaml_path, get_latest_date=True, custom_date=None, upload=True, directory=None)
+
+def test_missing_key_ecpds_params(mock_ctx, mock_yaml_path):
+    """ Test that the main function raises an error if 'ecpds' is missing in the YAML file."""
+    with open(mock_yaml_path, 'r') as f:
+        config_data = yaml.safe_load(f)
+
+    # Remove the 'ecpds' section to simulate a missing key
+    del config_data['ecpds']
+
+    with open(mock_yaml_path, 'w') as f:
+        yaml.dump(config_data, f)
+
+    # Run the main function and check for errors
+    with pytest.raises(KeyError, match='ecpds'):
+        main(ctx=mock_ctx, yaml_path=mock_yaml_path, get_latest_date=True, custom_date=None, upload=True, directory=None)
+
+def test_missing_ecpds_param(mock_ctx, mock_yaml_path):
+    """ Test that the main function raises an error if 'url' is missing in the YAML file."""
+    with open(mock_yaml_path, 'r') as f:
+        config_data = yaml.safe_load(f)
+
+    # Remove the 'url' section to simulate a missing key
+    del config_data['ecpds']['url']
+
+    with open(mock_yaml_path, 'w') as f:
+        yaml.dump(config_data, f)
+
+    # Run the main function and check for errors
+    with pytest.raises(ValueError, match='Missing required parameter: url'):
+        main(ctx=mock_ctx, yaml_path=mock_yaml_path, get_latest_date=True, custom_date=None, upload=True, directory=None)
+
+def test_missing_shared_param(mock_ctx, mock_yaml_path):
+    """ Test that the main function raises an error if 'email_recipients' is missing in the YAML file."""
+    with open(mock_yaml_path, 'r') as f:
+        config_data = yaml.safe_load(f)
+
+    # Remove the 'email_recipients' section to simulate a missing key
+    del config_data['shared_params']['email_recipients']
+
+    with open(mock_yaml_path, 'w') as f:
+        yaml.dump(config_data, f)
+
+    # Run the main function and check for errors
+    with pytest.raises(ValueError, match='Missing required parameter: email_recipients'):
+        main(ctx=mock_ctx, yaml_path=mock_yaml_path, get_latest_date=True, custom_date=None, upload=True, directory=None)
+
+def test_missing_s3_bucket_param(mock_ctx, mock_yaml_path):
+
+    """ Test that the main function raises an error if 's3_bucket' is missing in the YAML file."""
+    with open(mock_yaml_path, 'r') as f:
+        config_data = yaml.safe_load(f)
+
+    # Remove the 's3_bucket' section to simulate a missing key
+    del config_data['shared_params']['s3_bucket']
+
+    with open(mock_yaml_path, 'w') as f:
+        yaml.dump(config_data, f)
+
+    # Run the main function and check for errors
+    with pytest.raises(ValueError, match='Missing required parameter: s3_bucket'):
+        main(ctx=mock_ctx, yaml_path=mock_yaml_path, get_latest_date=True, custom_date=None, upload=True, directory=None)
+
+def test_directory_creation_failures(mock_ctx, mock_yaml_path, mock_report, caplog):
+    with patch('indra.fetch.ecpds.last_date_of_ecpds_data', return_value=datetime(2024, 1, 1)), \
+         patch('indra.fetch.ecpds.construct_ecpds_urls', return_value=["test_url"]), \
+         patch('indra.fetch.ecpds.download_from_url', return_value=True), \
+         patch('indra.fetch.ecpds.upload_data_to_s3', return_value=0), \
+         patch('indra.fetch.ecpds.os.makedirs', side_effect=OSError("Directory creation failed")), \
+         patch('indra.fetch.ecpds.Report') as MockReport:
+
+        MockReport.return_value = mock_report()
+        custom_directory = "custom_dir"
+
+        main(ctx=mock_ctx, yaml_path=mock_yaml_path, get_latest_date=True,
+             custom_date=None, upload=True, directory=custom_directory)
+
+        assert "Directory creation failed" in caplog.text
+
+def test_upload_verification(mock_ctx, mock_yaml_path, mock_report):
+    """Test that the upload function is called with the correct parameters."""
+    with patch('indra.fetch.ecpds.last_date_of_ecpds_data', return_value=datetime(2024, 1, 1)), \
+         patch('indra.fetch.ecpds.construct_ecpds_urls', return_value=["test_url"]), \
+         patch('indra.fetch.ecpds.download_from_url', return_value=True), \
+         patch('indra.fetch.ecpds.upload_data_to_s3') as mock_upload, \
+         patch('indra.fetch.ecpds.tempfile.TemporaryDirectory') as mock_tempdir, \
+         patch('indra.fetch.ecpds.Path') as mock_path, \
+         patch('indra.fetch.ecpds.Report') as MockReport:
+
+        # Mock directory and files
+        mock_tempdir.return_value.__enter__.return_value = "tempdir"
+        mock_path.return_value.glob.return_value = ["file1.grib"]  # Pretend a file exists
+
+        # Mock Report behavior
+        report_instance = MagicMock()
+        report_instance.any_criticals.return_value = False
+        MockReport.return_value = report_instance
+        mock_upload.return_value = 0  # Simulate successful upload
+
+        main(ctx=mock_ctx, yaml_path=mock_yaml_path, get_latest_date=True,
+             custom_date=None, upload=True, directory=None)
+
+        #  Now upload_data_to_s3 should be called
+        mock_upload.assert_called()
+
+@mock_aws
+def test_s3_upload_success(tmp_path):
+    """test if s3 upload is functioning well"""
+    # Setup
+    test_dir = tmp_path / "test_upload"
+    test_dir.mkdir(parents=True)
+    file_path = test_dir / "file1.grib"
+    file_path.write_text("dummy content")
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-bucket")
+
+    # Call
+    result = upload_data_to_s3(
+        upload_dir=str(test_dir),
+        Bucket="test-bucket",
+        Prefix="dsid-dsname/folder",
+        extension="grib",
+        raise_error=False
+    )
+
+    # Assert
+    assert result == 0  # 0 failed uploads
+    response = s3.list_objects_v2(Bucket="test-bucket", Prefix="dsid-dsname/folder")
+    assert "Contents" in response
+    assert len(response["Contents"]) == 1
+
+@mock_aws
+def test_ecpds_main_s3_integration(mock_ctx, mock_yaml_path, mock_report):
+    """checks if main function invokes upload module"""
+    # Setup fake S3
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-bucket")
+
+    # Create temp dir with dummy files
+    with tempfile.TemporaryDirectory() as tmpdirname:
+        Path(f"{tmpdirname}/file1.grib").touch()
+
+        with patch("indra.fetch.ecpds.last_date_of_ecpds_data", return_value=datetime(2024, 1, 1)), \
+             patch("indra.fetch.ecpds.construct_ecpds_urls", return_value=["url1", "url2"]), \
+             patch("indra.fetch.ecpds.download_from_url", return_value=True), \
+             patch("indra.fetch.ecpds.Report") as MockReport:
+
+            MockReport.return_value = mock_report()
+            MockReport.return_value.any_criticals.return_value = False
+
+            # Run main with real upload but mocked S3
+            main(
+                ctx=mock_ctx,
+                yaml_path=mock_yaml_path,
+                get_latest_date=True,
+                custom_date=None,
+                upload=True,
+                directory=tmpdirname
+            )
+
+            # List uploaded objects
+            uploaded = s3.list_objects_v2(Bucket="test-bucket")
+            keys = [obj["Key"] for obj in uploaded.get("Contents", [])]
+
+            # Assert file were uploaded with correct extensions
+            assert any("grib" in key for key in keys)
+
+@mock_aws
+def test_ecpds_main_s3_total_failure(mock_ctx, mock_yaml_path, mock_report):
+    """checks if adequate errors are raised if critical upload failure"""
+    # Setup fake S3 bucket
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-bucket")
+
+    # Create temp dir with dummy files
+    with tempfile.TemporaryDirectory() as tmpdirname:
+        Path(f"{tmpdirname}/file1.grib").touch()
+        Path(f"{tmpdirname}/file2.grib").touch()
+
+        with patch("indra.fetch.ecpds.last_date_of_ecpds_data", return_value=datetime(2024, 1, 1)), \
+             patch("indra.fetch.ecpds.construct_ecpds_urls", return_value=["url1", "url2"]), \
+             patch("indra.fetch.ecpds.download_from_url", return_value=True), \
+             patch("indra.fetch.ecpds.upload_data_to_s3", return_value=2), \
+             patch("indra.fetch.ecpds.Report") as MockReport:
+
+            MockReport.return_value = mock_report()
+            MockReport.return_value.any_criticals.return_value = False
+
+            main(
+                ctx=mock_ctx,
+                yaml_path=mock_yaml_path,
+                get_latest_date=True,
+                custom_date=None,
+                upload=True,
+                directory=tmpdirname
+            )
+
+            # Assert that no files are in S3 (since uploads failed)
+            uploaded = s3.list_objects_v2(Bucket="test-bucket")
+            assert "Contents" not in uploaded
+
+@mock_aws
+def test_ecpds_main_s3_partial_failure(mock_ctx, mock_yaml_path, mock_report):
+    """tests for case when only some of the uploads are successful"""
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-bucket")
+
+    with tempfile.TemporaryDirectory() as tmpdirname:
+        Path(f"{tmpdirname}/file1.grib").touch()
+        Path(f"{tmpdirname}/file2.grib").touch()
+
+        with patch("indra.fetch.ecpds.last_date_of_ecpds_data", return_value=datetime(2024, 1, 1)), \
+             patch("indra.fetch.ecpds.construct_ecpds_urls", return_value=["url1", "url2"]), \
+             patch("indra.fetch.ecpds.download_from_url", return_value=True), \
+             patch("indra.fetch.ecpds.upload_data_to_s3", return_value=1), \
+             patch("indra.fetch.ecpds.Report") as MockReport:
+
+            # Simulate a successful upload manually
+            s3.put_object(Bucket="test-bucket", Key="ecpds/file1.grib", Body=b"dummy")
+
+            MockReport.return_value = mock_report()
+            MockReport.return_value.any_criticals.return_value = False
+
+            main(
+                ctx=mock_ctx,
+                yaml_path=mock_yaml_path,
+                get_latest_date=True,
+                custom_date=None,
+                upload=True,
+                directory=tmpdirname
+            )
+
+            uploaded = s3.list_objects_v2(Bucket="test-bucket")
+            keys = [obj["Key"] for obj in uploaded.get("Contents", [])]
+
+            assert len(keys) == 1
+            assert any("grib" in key for key in keys)
+
+@mock_aws
+def test_total_download_failure(mock_ctx, mock_yaml_path, mock_report):
+    """tests case when all downloads fail"""
+    # Setup mock S3
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-bucket")
+
+    # Create temp dir, but files won't be written since download fails
+    with tempfile.TemporaryDirectory() as tmpdirname:
+        # Mock everything as usual
+        with patch("indra.fetch.ecpds.last_date_of_ecpds_data", return_value=datetime(2024, 1, 1)), \
+             patch("indra.fetch.ecpds.construct_ecpds_urls", return_value=["url1", "url2"]), \
+             patch("indra.fetch.ecpds.download_from_url", return_value=False), \
+             patch("indra.fetch.ecpds.Report") as MockReport:
+
+            report_instance = mock_report()
+            MockReport.return_value = report_instance
+            report_instance.any_criticals.return_value = True
+
+            # Run main
+            main(
+                ctx=mock_ctx,
+                yaml_path=mock_yaml_path,
+                get_latest_date=True,
+                custom_date=None,
+                upload=True,
+                directory=tmpdirname
+            )
+
+            # Assert critical status was reported
+            report_instance.add_a_status_report.assert_any_call(
+                'ECPDS Data Retrieval',
+                Status.CRITICAL,
+                'Download of all 2 files failed'
+            )
+
+            # And nothing got uploaded
+            uploaded = s3.list_objects_v2(Bucket="test-bucket")
+            assert "Contents" not in uploaded or uploaded["KeyCount"] == 0
