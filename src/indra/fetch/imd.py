@@ -186,27 +186,35 @@ def main(
                 filepath.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     logger.info(f"Downloading {datacode} to {filepath}")
-                    session = retry_session(retries=3)
+                    session = retry_session(retries=6, backoff_factor=5)
                     response = session.get(url, timeout=20)
                     logger.debug(f"Response status code: {response.status_code}")
                     # Check if the response status code is 200 (OK)
                     if response.status_code == 200:
                         logger.info(f"Data downloaded successfully from {url}")
-                        df = clean_imd_data(pd.read_json(io.StringIO(response.text)), live=True, datacode=datacode)
-                        logger.info("Data cleaned successfully")
-                        df.to_csv(filepath, index=False)
-                        logger.debug(f"Data saved to {filepath}")
-                        no_downloads += 1
+                        try:
+                            raw_df = pd.read_json(io.StringIO(response.text))
+                            df = clean_imd_data(raw_df, live=True, datacode=datacode)
+                            logger.info("Data cleaned successfully")
+                            df.to_csv(filepath, index=False)
+                            logger.debug(f"Data saved to {filepath}")
+                            no_downloads += 1
+                        except ValueError as e:
+                            logger.warning(f"Failed to parse JSON for {datacode}: {e}")
+                            with open(filepath, "w", encoding="utf-8") as f:
+                                f.write(response.text)
+                            logger.debug(f"Raw data saved to {filepath} instead")
                     else:
-                        message = f"Downloading {datacode} failed due to status code {response.status_code} "
+                        message = f"Downloading {datacode} failed due to status code {response.status_code}"
                         logger.error(message)
+
                 except Exception as e:
                     logger.error(f"Error downloading {datacode} for {timecode}: {e}")
                 # upload the data to S3
                 s3_prefix = f"{imd_params['ds_id']}-{imd_params['ds_name']}/{imd_params[version]['folder_name']}/{date}"
                 if no_downloads == 0:
                     logger.info(f"no file to upload to {s3_prefix}")
-                    critical_report = Report(job_name="IMD Daily Job", email_recipients=shared_params["email_recipients"])
+                    critical_report = Report(job_name=f"IMD {download_frequency.capitalize()} Job: {time}", email_recipients=shared_params["email_recipients"])
                     message = f"Downloading {datacode} failed and hence no files to upload to S3"
                     critical_report.add_a_status_report("IMD Data Retrieval", Status.CRITICAL, message)
                     critical_report.add_attachment(f"logs/{parent_config.get('log_file')}")
@@ -242,7 +250,7 @@ def main(
         if timecode.hour == 23 or email:
             logger.info("Timecode: %s", timecode)
             logger.info("Sending email...")
-            report = Report(job_name="IMD Daily Job", email_recipients=shared_params["email_recipients"])
+            report = Report(job_name=f"IMD {download_frequency.capitalize()} Job Summary: {date}", email_recipients=shared_params["email_recipients"])
             df = pd.read_csv(run_summary_path)
 
             expected_files = len(df)
