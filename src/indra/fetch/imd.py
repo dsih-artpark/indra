@@ -204,6 +204,11 @@ def main(
                             with open(filepath, "w", encoding="utf-8") as f:
                                 f.write(response.text)
                             logger.debug(f"Raw data saved to {filepath} instead")
+                    elif response.status_code == 404 or response.status_code == 400:
+                        logger.error(f"Data not found for {datacode} at {url}")
+                        message = f"Data not found for {datacode} at {url}"
+                        report = Report(job_name=f"IMD {download_frequency.capitalize()} Job: {time}", email_recipients=shared_params["email_recipients"])
+                        report.add_a_status_report("IMD Data Retrieval", Status.ERROR, message)
                     else:
                         message = f"Downloading {datacode} failed due to status code {response.status_code}"
                         logger.error(message)
