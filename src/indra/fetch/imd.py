@@ -224,6 +224,10 @@ def main(
                     critical_report.add_a_status_report("IMD Data Retrieval", Status.CRITICAL, message)
                     critical_report.add_attachment(f"logs/{parent_config.get('log_file')}")
                     critical_report.send_email()
+                elif no_downloads == 0 and list_of_status_codes[datacode] in [400, 401, 404]:
+                    logger.info(f"no file to upload to {s3_prefix}")
+                    message = f"Downloading {datacode} failed: {list_of_status_codes[datacode]}; hence no files to upload to S3"
+                    logger.error(message)
                 else:
                     failed_uploads = upload_data_to_s3(
                         upload_dir=folder,
