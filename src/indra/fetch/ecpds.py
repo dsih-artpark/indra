@@ -275,17 +275,13 @@ def main(
                                 extension=filepath.split(".")[-1],
                                 raise_error=ecpds_params["raise_error"],
                             )
-                    else:
-                        message = "No files available for upload"
-                        logger.warning(message)
-                        report.add_a_status_report("ECPDS Data Upload", Status.WARNING, message)
 
                     if failed_uploads == 0:
                         message = f"All {total_files} files uploaded successfully"
                         logger.info(message)
                         report.add_a_status_report("ECPDS Data Upload", Status.SUCCESS, message)
                     elif failed_uploads >= 1 and failed_uploads < total_files:
-                        message = f" Only {total_files - failed_uploads} out of {total_files} files uploaded"
+                        message = f"Only {total_files - failed_uploads} out of {total_files} files uploaded"
                         logger.error(message)
                         report.add_a_status_report("ECPDS Data Upload", Status.ERROR, message)
                     else:

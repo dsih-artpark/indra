@@ -171,6 +171,7 @@ def main(
 
             # Iterate over both datacodes
             datacodes = [datacode for datacode in params.keys() if datacode.startswith("imd_")]
+            list_of_status_codes = {}
             for datacode in datacodes:
                 # Counting the number of files downloaded and uploaded
                 no_downloads = 0
@@ -189,6 +190,7 @@ def main(
                     session = retry_session(retries=6, backoff_factor=5)
                     response = session.get(url, timeout=20)
                     logger.debug(f"Response status code: {response.status_code}")
+                    list_of_status_codes[datacode] = response.status_code
                     # Check if the response status code is 200 (OK)
                     if response.status_code == 200:
                         logger.info(f"Data downloaded successfully from {url}")
@@ -212,10 +214,13 @@ def main(
                     logger.error(f"Error downloading {datacode} for {timecode}: {e}")
                 # upload the data to S3
                 s3_prefix = f"{imd_params['ds_id']}-{imd_params['ds_name']}/{imd_params[version]['folder_name']}/{date}"
-                if no_downloads == 0:
+
+                if no_downloads == 0 and list_of_status_codes[datacode] not in [400, 401, 404]:
                     logger.info(f"no file to upload to {s3_prefix}")
-                    critical_report = Report(job_name=f"IMD {download_frequency.capitalize()} Job: {time}", email_recipients=shared_params["email_recipients"])
-                    message = f"Downloading {datacode} failed and hence no files to upload to S3"
+                    critical_report = Report(
+                        job_name=f"IMD {download_frequency.capitalize()} Job: {time}", email_recipients=shared_params["email_recipients"]
+                    )
+                    message = f"Downloading {datacode} failed: {list_of_status_codes[datacode]}; hence no files to upload to S3"
                     critical_report.add_a_status_report("IMD Data Retrieval", Status.CRITICAL, message)
                     critical_report.add_attachment(f"logs/{parent_config.get('log_file')}")
                     critical_report.send_email()
@@ -250,7 +255,9 @@ def main(
         if timecode.hour == 23 or email:
             logger.info("Timecode: %s", timecode)
             logger.info("Sending email...")
-            report = Report(job_name=f"IMD {download_frequency.capitalize()} Job Summary: {date}", email_recipients=shared_params["email_recipients"])
+            report = Report(
+                job_name=f"IMD {download_frequency.capitalize()} Job Summary: {date}", email_recipients=shared_params["email_recipients"]
+            )
             df = pd.read_csv(run_summary_path)
 
             expected_files = len(df)

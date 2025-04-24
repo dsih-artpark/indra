@@ -1,4 +1,4 @@
-# Indra v0.1.0
+# Indra v0.1.1
 
 A CLI tool for fetching data from open data sources, to be extended to forecast as well.
 Currently, only the fetching data from CDS and ECPDS is implemented.
