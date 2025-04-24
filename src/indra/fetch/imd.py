@@ -256,7 +256,7 @@ def main(
         else:
             logger.error("No data was downloaded or uploaded")
 
-        if timecode.hour == 23 or email:
+        if (timecode.hour == 23 and timecode.minute == 0) or email:
             logger.info("Timecode: %s", timecode)
             logger.info("Sending email...")
             report = Report(
