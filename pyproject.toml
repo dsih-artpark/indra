@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "indra"
-version = "0.1.0"
+version = "0.1.1"
 description = ""
 authors = ["Sai Sneha <sneha@artpark.in>"]
 license = "GPL-3.0-or-later"
