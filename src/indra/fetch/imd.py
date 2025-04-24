@@ -133,6 +133,7 @@ def main(
 
     # Create a list to store the logs of the run summary
     log_lines = []
+    timecodes_with_4xx_errors= {}
 
     try:
         while True:
@@ -204,11 +205,12 @@ def main(
                             with open(filepath, "w", encoding="utf-8") as f:
                                 f.write(response.text)
                             logger.debug(f"Raw data saved to {filepath} instead")
-                    elif response.status_code == 404 or response.status_code == 400:
-                        logger.error(f"Data not found for {datacode} at {url}")
+                    elif response.status_code == 404 or response.status_code == 400 or response.status_code == 401:
+                        logger.error(f"Data not found for {datacode} at {url} due to status code {response.status_code}")
                         message = f"Data not found for {datacode} at {url}"
-                        report = Report(job_name=f"IMD {download_frequency.capitalize()} Job: {time}", email_recipients=shared_params["email_recipients"])
-                        report.add_a_status_report("IMD Data Retrieval", Status.ERROR, message)
+                        logger.error(message)
+                        timecodes_with_4xx_errors[datacode] = [time, response.status_code]
+                        print(timecodes_with_4xx_errors)
                     else:
                         message = f"Downloading {datacode} failed due to status code {response.status_code}"
                         logger.error(message)
@@ -217,7 +219,7 @@ def main(
                     logger.error(f"Error downloading {datacode} for {timecode}: {e}")
                 # upload the data to S3
                 s3_prefix = f"{imd_params['ds_id']}-{imd_params['ds_name']}/{imd_params[version]['folder_name']}/{date}"
-                if no_downloads == 0:
+                if no_downloads == 0 and len(timecodes_with_4xx_errors) == 0:
                     logger.info(f"no file to upload to {s3_prefix}")
                     critical_report = Report(job_name=f"IMD {download_frequency.capitalize()} Job: {time}", email_recipients=shared_params["email_recipients"])
                     message = f"Downloading {datacode} failed and hence no files to upload to S3"
@@ -293,6 +295,11 @@ def main(
                 message = f"All {expected_files} files were uploaded"
                 logger.info(message)
                 report.add_a_status_report("IMD Data Upload", Status.SUCCESS, message)
+
+            if len(timecodes_with_4xx_errors) != 0:
+                message = f"The following timecodes encountered 4xx errors: {timecodes_with_4xx_errors}"
+                logger.error(message)
+                report.add_a_status_report("IMD Data Retrieval Errors", Status.ERROR, message)
 
             if report.any_criticals() or report.any_errors():
                 report.add_attachment(str(run_summary_path))
