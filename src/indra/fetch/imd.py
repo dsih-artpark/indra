@@ -34,24 +34,58 @@ def clean_imd_data(df: pd.DataFrame, datacode: str, live=False) -> pd.DataFrame:
     :return:
         The cleaned IMD data as a pandas DataFrame.
     """
+    # Drop the WEATHER_ICON, WEATHER_MESSAGE, BACKGROUND, and BACKGROUND_URL columns if they exist
+    columns_to_drop = ["WEATHER_ICON", "WEATHER_MESSAGE", "BACKGROUND", "BACKGROUND_URL"]
+    existing_columns = [col for col in columns_to_drop if col in df.columns]
+    if existing_columns:
+        df = df.drop(columns=existing_columns)
 
-    # Drop the WEATHER_ICON, WEATHER_MESSAGE, BACKGROUND, and BACKGROUND_URL columns
-    df = df.drop(columns=["WEATHER_ICON", "WEATHER_MESSAGE", "BACKGROUND", "BACKGROUND_URL"])
     if datacode == "imd_Station_API":
+        # Check if required columns exist before processing
+        required_columns = ["Date of Observation", "Time"]
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            for col in missing_columns:
+                logger.warning(f"Required column '{col}' not found in the DataFrame")
+                # Add empty columns for missing required fields
+                df[col] = None
+
         # Validate and fix the date and time columns, and use them to create a new timestamp column
         df["Date"] = pd.to_datetime(df["Date of Observation"], errors="coerce")
         df.drop(columns=["Date of Observation"], inplace=True)
-        df["Time"] = df["Time"].astype(str).str.zfill(2)
-        df.insert(0, "timestamp", df.apply(lambda row: f"{row['Date'].strftime('%Y-%m-%d')}T{row['Time']}:00:00.00+05:30", axis=1))
-        # Clean the Station and Sunset columns to remove all trailing and leading \r, \n, \t, and spaces
-        df["Station"] = df["Station"].str.strip("\r\n\t ")
-        df["Sunset"] = df["Sunset"].str.strip("\r\n\t ")
 
-        # Ensure that 'Sunrise', 'Sunset', 'Moonrise', 'Moonset' are in the correct format of HH:MM:SS
-        df["Sunrise"] = pd.to_datetime(df["Sunrise"], errors="coerce", format="%H:%M").dt.strftime("%H:%M")
-        df["Sunset"] = pd.to_datetime(df["Sunset"], errors="coerce", format="%H:%M").dt.strftime("%H:%M")
-        df["Moonrise"] = pd.to_datetime(df["Moonrise"], errors="coerce", format="%H:%M").dt.strftime("%H:%M")
-        df["Moonset"] = pd.to_datetime(df["Moonset"], errors="coerce", format="%H:%M").dt.strftime("%H:%M")
+        # Handle Time column safely
+        if "Time" in df.columns:
+            df["Time"] = df["Time"].astype(str).str.zfill(2)
+        else:
+            df["Time"] = "00"  # Default value
+
+        # Create timestamp safely
+        def create_timestamp(row):
+            try:
+                if pd.notna(row['Date']):
+                    return f"{row['Date'].strftime('%Y-%m-%d')}T{row['Time']}:00:00.00+05:30"
+                else:
+                    return None
+            except (ValueError, AttributeError):
+                return None
+
+        df.insert(0, "timestamp", df.apply(create_timestamp, axis=1))
+
+        # Clean string columns safely
+        for col in ["Station", "Sunset"]:
+            if col in df.columns and df[col].dtype == object:
+                df[col] = df[col].str.strip("\r\n\t ") if hasattr(df[col], 'str') else df[col]
+
+        # Ensure that time columns are in the correct format
+        time_columns = ["Sunrise", "Sunset", "Moonrise", "Moonset"]
+        for col in time_columns:
+            if col in df.columns:
+                try:
+                    df[col] = pd.to_datetime(df[col], errors="coerce", format="%H:%M").dt.strftime("%H:%M")
+                except AttributeError:
+                    # This happens when all values are None/NaT
+                    pass
 
         mapper_dict = {
             "Station": "stationName",
@@ -72,40 +106,81 @@ def clean_imd_data(df: pd.DataFrame, datacode: str, live=False) -> pd.DataFrame:
             "Moonset": "moonset",
         }
 
-        numeric_cols = ["meanSeaLevelPressure", "windSpeed", "temperature", "nebulosity", "humidity", "last24hrsRainfall", "feelLike"]
+        # Check for expected columns and warn if missing
+        for expected_col in mapper_dict.keys():
+            if expected_col not in df.columns:
+                logger.warning(f"Expected column '{expected_col}' not found in the DataFrame")
+                # Add the column with None values to avoid KeyError during renaming
+                df[expected_col] = None
 
-        for expected_cols in mapper_dict.keys():
-            if expected_cols not in df.columns:
-                logger.warning(f"Expected column {expected_cols} not found in the DataFrame")
         # Rename the columns
         df.rename(columns=mapper_dict, inplace=True)
 
-        # Convert the numeric columns to float
-        for col in numeric_cols:
-            df[col] = df[col].replace("NA", None)
-            df[col] = df[col].replace("", None)
-            df[col] = df[col].astype(float)
+        numeric_cols = ["meanSeaLevelPressure", "windSpeed", "temperature", "nebulosity", "humidity", "last24hrsRainfall", "feelLike"]
 
-        # Convert Station Name to All Caps
-        df["stationName"] = df["stationName"].str.upper()
-        # Drop the Date and Time columns
-        df = df.drop(columns=["Date", "Time"])
+        # Convert the numeric columns to float safely
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = df[col].replace(["NA", ""], None)
+                try:
+                    df[col] = df[col].astype(float)
+                except (ValueError, TypeError):
+                    logger.warning(f"Could not convert column '{col}' to float, keeping as is")
+
+        # Convert Station Name to All Caps if it exists and is string type
+        if "stationName" in df.columns and df["stationName"].dtype == object:
+            df["stationName"] = df["stationName"].str.upper()
+
+        # Drop the Date and Time columns if they exist
+        columns_to_drop = ["Date", "Time"]
+        existing_columns = [col for col in columns_to_drop if col in df.columns]
+        if existing_columns:
+            df = df.drop(columns=existing_columns)
 
     elif datacode == "imd_AWS_ARG":
-        # Validate and fix the date and time columns, and use them to create a new timestamp column
-        df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
-        df["TIME"] = pd.to_datetime(df["TIME"], errors="coerce", format="%H:%M:%S")
-        df.rename(columns={"ID": "stationID"}, inplace=True)
+        # Check if required columns exist before processing
+        required_columns = ["DATE", "TIME"]
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            for col in missing_columns:
+                logger.warning(f"Required column '{col}' not found in the DataFrame")
+                # Add empty columns for missing required fields
+                df[col] = None
 
-        df.insert(
-            0, "timestamp", df.apply(lambda row: f"{row['DATE'].strftime('%Y-%m-%d')}T{row['TIME'].strftime('%H:%M:%S.00+05:30')}", axis=1)
-        )
+        # Validate and fix the date and time columns safely
+        if "DATE" in df.columns:
+            df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
+        else:
+            df["DATE"] = pd.NaT
 
-        # Drop the Date and Time columns
-        df = df.drop(columns=["DATE", "TIME"])
+        if "TIME" in df.columns:
+            df["TIME"] = pd.to_datetime(df["TIME"], errors="coerce", format="%H:%M:%S")
+        else:
+            df["TIME"] = pd.NaT
+
+        # Handle ID column renaming safely
+        if "ID" in df.columns:
+            df.rename(columns={"ID": "stationID"}, inplace=True)
+
+        # Create timestamp safely
+        def create_aws_timestamp(row):
+            try:
+                if pd.notna(row['DATE']) and pd.notna(row['TIME']):
+                    return f"{row['DATE'].strftime('%Y-%m-%d')}T{row['TIME'].strftime('%H:%M:%S.00+05:30')}"
+                else:
+                    return None
+            except (ValueError, AttributeError):
+                return None
+
+        df.insert(0, "timestamp", df.apply(create_aws_timestamp, axis=1))
+
+        # Drop the Date and Time columns if they exist
+        columns_to_drop = ["DATE", "TIME"]
+        existing_columns = [col for col in columns_to_drop if col in df.columns]
+        if existing_columns:
+            df = df.drop(columns=existing_columns)
 
     return df
-
 
 @app.callback(invoke_without_command=True)
 def main(
