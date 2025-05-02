@@ -130,6 +130,21 @@ def main(
     # Read the YAML file with params
     params = get_params(yaml_path)
     shared_params = params["shared_params"]
+        # check if required shared_params are present
+    required_shared_params = ["s3_bucket", "email_recipients"]
+    for param in required_shared_params:
+        if param not in shared_params:
+            message = f"Missing required parameter: {param}"
+            logger.error(message)
+            raise ValueError(message)
+    required_imd_params = ["url", "ds_id", "ds_name", "extension"]
+    for datacode in params.keys():
+        if datacode.startswith("imd_"):
+            for param in required_imd_params:
+                if param not in params[datacode]:
+                    message = f"Missing required parameter: {param} for {datacode}"
+                    logger.error(message)
+                    raise ValueError(message)
 
     # Create a list to store the logs of the run summary
     log_lines = []
