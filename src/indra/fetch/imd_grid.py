@@ -24,7 +24,7 @@ def download_gridded_data(url, filename, element_clickID, css_selector_class, da
     try:
         with sync_playwright() as p:
             # Launch the browser in headless mode
-            browser = p.webkit.launch(headless=True)
+            browser = p.chromium.launch(headless=True)
 
             # Create a new browser context that allows downloads
             context = browser.new_context(accept_downloads=True)
@@ -104,11 +104,13 @@ def main(
 ) -> None:
 
     if directory is None:
-                logger.info("Using a Named Temporary Directory to store the data")
-                directory = tempfile.TemporaryDirectory().name
-                print(f"Temporary directory created at: {directory}")
+        logger.info("Using a Named Temporary Directory to store the data")
+        temp_dir = tempfile.TemporaryDirectory()
+        directory = temp_dir.name
+        print(f"Temporary directory created at: {directory}")
     else:
-                logger.info(f"Using the directory {directory} to store the data")
+        logger.info(f"Using the directory {directory} to store the data")
+
 
     params = get_params(yaml_path)
     shared_params = params["shared_params"]
@@ -143,6 +145,7 @@ def main(
     }
     # Download the data for both max and min temperature configurations
     for temp_type, config in download_config.items():
+        os.makedirs(config["download_path"], exist_ok=True)
         imd_grid_params = params[f'imd_gridded_{temp_type}']
         url = imd_grid_params["url"]
         logger.debug(f"Request URL: {url}")
