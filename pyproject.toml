@@ -19,7 +19,7 @@ pyyaml = "^6.0.2"
 beautifulsoup4 = "^4.13.3"
 joblib = "^1.4.2"
 python-dotenv = "^1.0.1"
-
+playwright = "^1.44.0"
 
 [tool.poetry.group.dev.dependencies]
 ipython = "^9.0.2"

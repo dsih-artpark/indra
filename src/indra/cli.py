@@ -5,7 +5,7 @@ from typing import Optional
 import typer
 from dotenv import load_dotenv
 
-from indra.fetch import cds_app, ecpds_app, imd_app
+from indra.fetch import cds_app, ecpds_app, imd_app, imd_grid_app
 from indra.logging_config import configure_logging
 
 # Create the main app
@@ -88,5 +88,6 @@ app.add_typer(fetch_app, name="fetch")
 fetch_app.add_typer(cds_app, name="cds")
 fetch_app.add_typer(imd_app, name="imd")
 fetch_app.add_typer(ecpds_app, name="ecpds")
+fetch_app.add_typer(imd_grid_app, name="imd_grid")
 if __name__ == "__main__":
     app(obj={})
