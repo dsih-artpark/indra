@@ -6,6 +6,8 @@ from indra.fetch.imd import app as imd_app
 from indra.fetch.imd import clean_imd_data
 from indra.fetch.imd_grid import app as imd_grid_app
 from indra.fetch.imd_grid import download_data_for_dates, download_gridded_data
+from indra.fetch.ksndmc import app as ksndmc_app
+from indra.fetch.ksndmc import ksndmc_fetch
 
 __all__ = [
     "cds_app",
@@ -18,6 +20,8 @@ __all__ = [
     "fetch_and_upload_cds_data",
     "imd_app",
     "imd_grid_app",
+    "ksndmc_app",
+    "ksndmc_fetch",
     "last_date_of_cds_data",
     "last_date_of_ecpds_data",
     "retrieve_data_from_cds",
