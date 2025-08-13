@@ -3,7 +3,7 @@ name = "indra"
 version = "0.1.1"
 description = ""
 authors = [{ name = "Sai Sneha", email = "sneha@artpark.in" }]
-requires-python = "~=3.11"
+requires-python = ">=3.11"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 dependencies = [
