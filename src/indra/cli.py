@@ -5,7 +5,17 @@ from typing import Optional
 import typer
 from dotenv import load_dotenv
 
-from indra.fetch import cds_app, ecpds_app, imd_app, imd_district_rainfall_app, imd_grid_app
+from indra.fetch import (
+    cds_app,
+    ecpds_app,
+    imd_app,
+    imd_coastal_bulletin_app,
+    imd_cwf_latlong_app,
+    imd_dist_warning_app,
+    imd_district_rainfall_app,
+    imd_grid_app,
+    imd_river_basin_qpf_app,
+)
 from indra.logging_config import configure_logging
 
 # Create the main app
@@ -90,5 +100,10 @@ fetch_app.add_typer(imd_app, name="imd")
 fetch_app.add_typer(ecpds_app, name="ecpds")
 fetch_app.add_typer(imd_grid_app, name="imd_grid")
 fetch_app.add_typer(imd_district_rainfall_app, name="imd_district_rainfall")
+fetch_app.add_typer(imd_cwf_latlong_app, name="imd_cwf_latlong")
+fetch_app.add_typer(imd_river_basin_qpf_app, name="imd_river_basin_qpf")
+fetch_app.add_typer(imd_coastal_bulletin_app, name="imd_coastal_bulletin")
+fetch_app.add_typer(imd_dist_warning_app, name="imd_dist_warning")
+
 if __name__ == "__main__":
     app(obj={})
