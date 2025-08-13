@@ -301,7 +301,7 @@ def main(
             time = timecode.strftime("%H_%M_%S")
 
             # Iterate over both datacodes
-            datacodes = [datacode for datacode in params.keys() if datacode.startswith("imd_")]
+            datacodes = [datacode for datacode in params.keys() if datacode.startswith("district_rainfall_")]
             list_of_status_codes = {}
             for datacode in datacodes:
                 # Counting the number of files downloaded and uploaded
