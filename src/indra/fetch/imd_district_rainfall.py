@@ -255,7 +255,7 @@ def main(
             raise ValueError(message)
     required_imd_params = ["url", "ds_id", "ds_name", "extension"]
     for datacode in params.keys():
-        if datacode.startswith("imd_"):
+        if datacode.startswith("imd_district"):
             for param in required_imd_params:
                 if param not in params[datacode]:
                     message = f"Missing required parameter: {param} for {datacode}"
