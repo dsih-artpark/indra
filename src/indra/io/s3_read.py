@@ -1,0 +1,64 @@
+"""Download files from S3 to local filesystem.
+
+Provides a thin wrapper around boto3 for pulling raw data (NetCDF, GeoJSON)
+from S3 to a local directory. Used by the CoS module to fetch ERA5 .nc files
+and region shapefiles on demand.
+"""
+
+import logging
+import os
+
+import boto3
+from botocore.exceptions import ClientError
+
+logger = logging.getLogger(__name__)
+
+
+def download_from_s3(
+    *,
+    bucket: str,
+    key: str,
+    local_path: str,
+    overwrite: bool = False,
+) -> str:
+    """Download a single file from S3 to a local path.
+
+    :param str bucket:
+        Name of the S3 bucket.
+    :param str key:
+        S3 object key (e.g. ``boundaries/GBA_zone.geojson``).
+    :param str local_path:
+        Absolute path to save the file locally.
+    :param bool overwrite:
+        If ``True``, re-download even if the local file exists.
+        Default: ``False``.
+    :returns:
+        The *local_path* the file was written to.
+    :raises FileNotFoundError:
+        If the S3 key does not exist.
+    :raises ClientError:
+        On any other S3/boto3 error.
+    """
+    if not overwrite and os.path.exists(local_path):
+        logger.info("File already exists locally, skipping download: %s", local_path)
+        return local_path
+
+    dirpath = os.path.dirname(local_path)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
+
+    client = boto3.client("s3")
+    logger.info("Downloading s3://%s/%s → %s", bucket, key, local_path)
+
+    try:
+        client.download_file(Bucket=bucket, Key=key, Filename=local_path)
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "")
+        if error_code in ("404", "NoSuchKey"):
+            raise FileNotFoundError(
+                f"S3 key not found: s3://{bucket}/{key}"
+            ) from exc
+        raise
+
+    logger.info("Download complete: %s", local_path)
+    return local_path

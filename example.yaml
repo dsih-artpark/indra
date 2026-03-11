@@ -37,3 +37,30 @@ ecpds:
   folder_name: '00z_ifs_0p25_oper'
   ds_source: 'ECMWF ECPDS'
   extensions: ["grib2", "index"]
+
+# ERA5 grid configuration (used by CoS module)
+era5:
+  resolution_deg: 0.1
+  s3_prefix: "MW0016DS0046-ERA5_Reanalysis_Single_Level/all_india_netcdf"
+  file_pattern: "era5_sfc_{variable}_{year}.nc"
+
+# Region profiles — add a block per city/granularity
+regions:
+  bengaluru-zones:
+    s3_key: "boundaries/GBA_zone_boundary_standardized.geojson"
+    id_field: "id"            # Feature-level id e.g. "zone_gba-n-1"
+    name_field: "regionName"  # e.g. "NORTH CORPORATION ZONE 1"
+  bengaluru-wards:
+    s3_key: "boundaries/GBA_ward_boundary_standardized.geojson"
+    id_field: "id"
+    name_field: "regionName"
+  bengaluru-corporation:
+    s3_key: "boundaries/GBA_corporation_boundary_standardized.geojson"
+    id_field: "id"
+    name_field: "regionName"
+
+# IDW tuning parameters (used by CoS module)
+cos:
+  idw_power: 2
+  search_radius_km: 25
+
