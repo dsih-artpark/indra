@@ -129,6 +129,12 @@ def _determine_nc_files(
     ["tp", "t2m"] would produce 4 files (2 vars × 2 years).
     """
     has_var_placeholder = "{variable}" in file_pattern
+    if has_var_placeholder and not variables:
+        raise ValueError(
+            "file_pattern contains '{variable}' placeholder but no variables "
+            "were provided. Pass a variables list or use a pattern without "
+            "'{variable}'."
+        )
     files: list[str] = []
     seen: set[str] = set()  # avoid duplicates
 
