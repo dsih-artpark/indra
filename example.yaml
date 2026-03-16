@@ -5,22 +5,21 @@ shared_params:
   s3_bucket: 'example-bucket-name'
 
 cds:
-  cds_dataset_name: "reanalysis-era5-single-levels"
+  cds_dataset_name: "reanalysis-era5-land"
   bounds_nwse:
-    ka: [19,74,11,79]  # Example bounds for Karnataka
+    india: [37.5, 67.5, 5.5, 98.5]  # All-India + ~50km buffer
   variables:
     "2m_temperature": "2t"
     "2m_dewpoint_temperature": "2d"
     "total_precipitation": "tp"
-    "10m_u_component_of_wind": "10u"
-    "10m_v_component_of_wind": "10v"
   start_date: None  # Will be set automatically if using --current-month
   end_date: None    # Will be set automatically if using --current-month
   ds_id: 'MW0016DS0046'
-  ds_name: "ERA5_Reanalysis_Single_Level"
+  ds_name: "ERA5_Land"
   folder_name: "all_india_netcdf"
   ds_source: "ECMWF CDS"
   extension: "nc"
+  max_workers: 12
 
 ecpds:
   url: 'https://data.ecmwf.int/forecasts'
@@ -41,8 +40,9 @@ ecpds:
 # ERA5 grid configuration (used by CoS module)
 era5:
   resolution_deg: 0.1
-  s3_prefix: "MW0016DS0046-ERA5_Reanalysis_Single_Level/all_india_netcdf"
-  file_pattern: "era5_sfc_{variable}_{year}.nc"
+  s3_prefix: "MW0016DS0046-ERA5_Land/all_india_netcdf"
+  file_pattern: "era5_land_{variable}_{year}_{month}.nc"
+  index_pattern: "era5_land_{variable}_{year}_{month}.json"
 
 # Region profiles — add a block per city/granularity
 regions:

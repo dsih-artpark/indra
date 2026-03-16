@@ -1,7 +1,20 @@
+"""Fetch ERA5-Land data from the Copernicus Climate Data Store.
+
+Downloads monthly NetCDF files for all-India using aria2c for fast parallel
+HTTP transfers, generates Kerchunk JSON sidecar indexes for each file,
+and uploads both the .nc and .json to S3.
+
+Supports two operating modes:
+- **update** (``--current-month``): re-downloads the current incomplete month
+  and overwrites the NC + JSON on S3.
+- **backfill** (``--backfill``): downloads a range of historical year-months.
+"""
+
 import io
-import itertools
 import logging
 import os
+import shutil
+import subprocess
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
@@ -13,40 +26,33 @@ import typer
 from requests.exceptions import HTTPError
 
 from indra.emails import Report, Status
-from indra.io import get_params, upload_data_to_s3
+from indra.io import generate_kerchunk_index, get_params, upload_data_to_s3
 
 logger = logging.getLogger(__name__)
 logging.captureWarnings(True)
 
 app = typer.Typer()
 
-def last_date_of_cds_data(suppress_output=True):
-    """
-    Returns the last date for which ERA5 data is available on the CDS.
+# ---------------------------------------------------------------------------
+# All-India bounding box (N, W, S, E) with ~50 km buffer
+# ---------------------------------------------------------------------------
+DEFAULT_AREA = [37.5, 67.5, 5.5, 98.5]
+DEFAULT_DATASET = "reanalysis-era5-land"
 
-    This function uses the CDS API to determine the most recent date for which data is available.
-    It handles potential errors related to authentication and data availability.
+
+# ---------------------------------------------------------------------------
+# Helper: CDS latest-date probe
+# ---------------------------------------------------------------------------
+def last_date_of_cds_data(suppress_output=True):
+    """Return the most recent date for which ERA5 data is available on CDS.
+
+    Makes a lightweight probe request and parses the error response from CDS
+    to extract the latest available timestamp.
 
     :param bool suppress_output:
-        Whether to suppress the output of the CDS API client.
-
-        **Default**: ``True``
-
+        Suppress stdout/stderr from the CDS client.  Default ``True``.
     :returns:
-        The last date for which ERA5 data is available and the standard output and error messages from the CDS API client.
-
-    :raises HTTPError:
-        If there is an issue with the HTTP request.
-
-    :raises Exception:
-        For any other exceptions that occur during the data retrieval process.
-
-    **Example:**
-
-    ```python
-    last_date, output = last_date_of_cds_data()
-    print(f"Last available date: {last_date}")
-    ```
+        ``(latest_timestamp, stdout_stderr_str)``
     """
     if suppress_output:
         stdout = io.StringIO()
@@ -56,314 +62,360 @@ def last_date_of_cds_data(suppress_output=True):
         std_op = stdout.getvalue() + "\n" + stderr.getvalue()
     else:
         client = cdsapi.Client()
-    # Setting a temporary directory for output
+        std_op = ""
+
     output_dir = TemporaryDirectory().name
 
-    # Setting some sample defaults for a trial request
     current_date = datetime.now()
-    sample_bounds_nwse = [12, 76, 11, 77]
-    variables = ["2m_temperature"]
-    dataset = "reanalysis-era5-single-levels"
-    product_type = "reanalysis"
-    format = "netcdf"
-
-    # Setting up request parameters
-    request = dict()
-    request["product_type"] = product_type
-    request["format"] = format
-    request["day"] = [current_date.strftime("%d")]
-    request["month"] = [current_date.strftime("%m")]
-    request["year"] = [current_date.strftime("%Y")]
-    request["variable"] = variables
-    request["area"] = sample_bounds_nwse
+    request = {
+        "product_type": "reanalysis",
+        "format": "netcdf",
+        "day": [current_date.strftime("%d")],
+        "month": [current_date.strftime("%m")],
+        "year": [current_date.strftime("%Y")],
+        "variable": ["2m_temperature"],
+        "area": [12, 76, 11, 77],  # tiny probe area
+    }
 
     try:
-        client.retrieve(dataset, request, output_dir)
+        client.retrieve(DEFAULT_DATASET, request, output_dir)
     except HTTPError as e:
         error_msg = str(e)
         if error_msg.startswith("401"):
-            # Error due to invalid credentials
             logger.error("Access to CDS API is not authorized. Check your credentials.")
             raise
         elif error_msg.startswith("400"):
             latest_timestamp_msg = error_msg.split(".")[-1].strip()
             latest_timestamp = datetime.strptime(latest_timestamp_msg[-16:-1], "%Y-%m-%d %H:%M")
-            logger.info(f"Latest timestamp available on CDS: {latest_timestamp.strftime('%Y-%m-%d %H:%M')}")
+            logger.info("Latest timestamp on CDS: %s", latest_timestamp.strftime("%Y-%m-%d %H:%M"))
             return latest_timestamp, std_op
         else:
-            logger.error(f"Failed to retrieve data from CDS: {error_msg}")
+            logger.error("Failed to retrieve data from CDS: %s", error_msg)
             raise
     except Exception as e:
-        logger.error(f"Failed to retrieve data from CDS: {str(e).replace(os.linesep, ' ')!s}")
+        logger.error("Failed to retrieve data from CDS: %s", str(e).replace(os.linesep, " "))
         raise
 
-def check_cds_credentials(raiseError: bool = True, suppress_output: bool = True, get_latest_date: bool = False):
-    """Check for the existence of the .cdsapirc credentials file.
 
-    This function checks whether the .cdsapirc file exists in the user's home directory.
-    If the file does not exist and `raiseError` is True, a FileNotFoundError is raised.
-    If the file does not exist and `raiseError` is False, a warning is logged and the function returns False.
-    If the file exists, a message is logged and the function returns True.
+# ---------------------------------------------------------------------------
+# Helper: CDS credential check
+# ---------------------------------------------------------------------------
+def check_cds_credentials(raiseError: bool = True, suppress_output: bool = True, get_latest_date: bool = False):
+    """Check for the existence of the ``.cdsapirc`` credentials file.
 
     :param bool raiseError:
-        Whether to raise an error if the credentials file is not found.
-
-        **Default**: ``True``
-
+        Raise :class:`FileNotFoundError` if missing.  Default ``True``.
     :param bool suppress_output:
-        Whether to suppress the output of the CDS API client.
-
-        **Default**: ``True``
-
+        Suppress CDS client output.  Default ``True``.
     :param bool get_latest_date:
-        Whether to return the latest available date from CDS.
-
-        **Default**: ``False``
-
+        Also return the latest available date.  Default ``False``.
     :returns:
-        True if the credentials file exists, False otherwise. Optionally returns the latest date if `get_latest_date` is True.
-
-    :raises FileNotFoundError:
-        If the credentials file is not found and `raiseError` is True.
-
-    **Example:**
-
-    ```python
-    exists, latest_date = check_cds_credentials(get_latest_date=True)
-    if exists:
-        print(f"Credentials verified. Latest date: {latest_date}")
-    else:
-        print("Credentials not found.")
-    ```
+        ``True`` if credentials exist; optionally ``(True, latest_date)``.
     """
-
     path = Path.home() / ".cdsapirc"
-    cds = "Climate data Store (CDS)"
+    cds = "Climate Data Store (CDS)"
     if not os.path.exists(path) and raiseError:
-        logger.error(f"The credentials file for the {cds} was not found.")
+        logger.error("The credentials file for the %s was not found.", cds)
         raise FileNotFoundError(f"The credentials file for the {cds} was not found.")
     elif not os.path.exists(path) and not raiseError:
-        logger.warning(f"The credentials file for the {cds} was not found. Check README.md for more details.")
+        logger.warning("The credentials file for the %s was not found.", cds)
         return False
     else:
-        latest_date, std_op = last_date_of_cds_data(suppress_output=suppress_output)
-        logger.info(f"CDS Credentials Verified at: \"{path}\"")
+        latest_date, _std_op = last_date_of_cds_data(suppress_output=suppress_output)
+        logger.info('CDS Credentials Verified at: "%s"', path)
         if get_latest_date:
             return True, latest_date
         return True
 
-def retrieve_data_from_cds(*,
-                           bounds_nwse: list,
-                           start_date: str,
-                           end_date: str,
-                           variables: list,
-                           output_dir: str,
-                           region: str,
-                           format: str = "netcdf",
-                           extension: str = "nc",
-                           dataset: str = "reanalysis-era5-single-levels",
-                           product_type: str = "reanalysis",
-                           overwrite: bool = True,
-                           check_credentials: bool = True,
-                           variable_code_dict: Optional[dict] = None
-                          ):
-    """Retrieve data from the Climate Data Store (CDS).
 
-    This function retrieves climate data from the CDS based on the specified parameters.
+# ---------------------------------------------------------------------------
+# aria2c download helpers
+# ---------------------------------------------------------------------------
+def _extract_download_url(client, dataset: str, request: dict) -> str | None:
+    """Submit a CDS retrieval and return only the download URL (no download).
 
-    :param list bounds_nwse:
-        List of coordinates defining the bounding box [north, west, south, east].
-
-    :param str start_date:
-        Start date for the data retrieval in the format 'YYYY-MM-DD'.
-
-    :param str end_date:
-        End date for the data retrieval in the format 'YYYY-MM-DD'.
-
-    :param list variables:
-        List of variables to retrieve.
-
-    :param str output_dir:
-        Directory where the output files will be saved.
-
-    :param str region:
-        The region for which data is being retrieved.
-
-    :param str format:
-        Format of the output files.
-
-        **Default**: ``"netcdf"``
-
-    :param str extension:
-        File extension of the data files.
-
-        **Default**: ``"nc"``
-
-    :param str dataset:
-        Dataset to retrieve data from.
-
-        **Default**: ``"reanalysis-era5-single-levels"``
-
-    :param str product_type:
-        Type of product to retrieve.
-
-        **Default**: ``"reanalysis"``
-
-    :param bool overwrite:
-        Whether to overwrite existing files.
-
-        **Default**: ``True``
-
-    :param bool check_credentials:
-        Whether to check CDS credentials before retrieval.
-
-        **Default**: ``True``
-
-    :param Optional[dict] variable_code_dict:
-        Dictionary mapping variable names to codes.
-
-    :raises HTTPError:
-        If there is an issue with the HTTP request.
-
-    :raises Exception:
-        For any other exceptions that occur during the data retrieval process.
-
-    **Example:**
-
-    ```python
-    retrieve_data_from_cds(
-        bounds_nwse=[12, 76, 11, 77],
-        start_date="2023-01-01",
-        end_date="2023-01-31",
-        variables=["2m_temperature"],
-        output_dir="./data",
-        region="India"
-    )
-    ```
+    :returns:
+        The download URL string, or ``None`` if extraction failed.
     """
+    try:
+        result = client.retrieve(dataset, request)
+        if hasattr(result, "location"):
+            return result.location
+        elif isinstance(result, dict) and "location" in result:
+            return result["location"]
+        else:
+            logger.warning("Could not extract download URL from CDS result")
+            return None
+    except Exception:
+        logger.exception("CDS retrieval failed")
+        return None
 
-    logger.info("Starting data retrieval from CDS")
+
+def _download_via_aria2c(url_file: str, output_dir: str, max_connections: int = 16) -> None:
+    """Launch aria2c to download all URLs listed in *url_file*.
+
+    :param str url_file:
+        Path to a text file with aria2c-format entries (URL + dir= + out=).
+    :param str output_dir:
+        Directory that aria2c should save files into.
+    :param int max_connections:
+        Max parallel connections.  Default ``16``.
+    """
+    cmd = [
+        "aria2c",
+        "--input-file", url_file,
+        "--dir", output_dir,
+        "--max-connection-per-server", str(max_connections),
+        "--split", str(max_connections),
+        "--min-split-size", "1M",
+        "--continue=true",
+        "--auto-file-renaming=false",
+        "--allow-overwrite=true",
+        "--console-log-level=warn",
+    ]
+    logger.info("Launching aria2c: %s", " ".join(cmd))
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        logger.error("aria2c failed (rc=%d): %s", proc.returncode, proc.stderr)
+        raise RuntimeError(f"aria2c exited with code {proc.returncode}: {proc.stderr}")
+    logger.info("aria2c downloads complete")
+
+
+# ---------------------------------------------------------------------------
+# Core retrieval function
+# ---------------------------------------------------------------------------
+def retrieve_era5_land(
+    *,
+    year: int,
+    months: list[int],
+    variables: dict[str, str],
+    output_dir: str,
+    area: list[float] | None = None,
+    dataset: str = DEFAULT_DATASET,
+    max_connections: int = 16,
+    check_credentials: bool = True,
+) -> list[str]:
+    """Download monthly ERA5-Land NetCDF files via aria2c.
+
+    For each ``(variable, month)`` combination, a CDS request is made to
+    obtain the download URL.  All URLs are batched into a single aria2c
+    invocation for fast parallel downloads.
+
+    :param int year:
+        Year to download.
+    :param list[int] months:
+        Month numbers to download (1-indexed).
+    :param dict[str, str] variables:
+        Mapping of CDS variable names to short codes, e.g.
+        ``{"2m_temperature": "2t"}``.
+    :param str output_dir:
+        Local directory for downloaded ``.nc`` files.
+    :param list[float] | None area:
+        Bounding box ``[N, W, S, E]``.  Defaults to all-India.
+    :param str dataset:
+        CDS dataset identifier.
+    :param int max_connections:
+        aria2c parallel connections.  Default ``16``.
+    :param bool check_credentials:
+        Verify CDS credentials before starting.  Default ``True``.
+    :returns:
+        List of downloaded ``.nc`` file paths.
+    """
+    if area is None:
+        area = DEFAULT_AREA
+
     if check_credentials:
-        logger.info("Checking CDS credentials.")
-        cds_credentials_bool, last_date_of_cds_data = check_cds_credentials(get_latest_date=True)
-    else:
-        logger.debug("Skipping CDS credentials check.")
+        check_cds_credentials(get_latest_date=False)
 
     client = cdsapi.Client()
-    logger.info("CDS API client initialized")
+    os.makedirs(output_dir, exist_ok=True)
 
-    # Code to generate tuples of (year, month) pairs in provided range
+    url_file = os.path.join(output_dir, "_aria2c_urls.txt")
+    expected_files: list[str] = []
 
-    try:
-        start_date = datetime.strptime(start_date, "%Y-%m-%d")
-        end_date = datetime.strptime(end_date, "%Y-%m-%d")
-        logger.debug(f"Start date: {start_date}, End date: {end_date}")
-    except ValueError as e:
-        logger.error(f"Error parsing dates: {e}")
-        raise
+    for var_full, var_code in variables.items():
+        for month in months:
+            month_str = f"{month:02d}"
+            filename = f"era5_land_{var_code}_{year}_{month_str}.nc"
+            filepath = os.path.join(output_dir, filename)
 
-    date_tuples = []
-    current_date = start_date
+            request = {
+                "product_type": "reanalysis",
+                "variable": var_full,
+                "data_format": "netcdf",
+                "download_format": "unarchived",
+                "year": str(year),
+                "month": [month_str],
+                "day": [f"{d:02d}" for d in range(1, 32)],
+                "time": [f"{h:02d}:00" for h in range(24)],
+                "area": area,
+            }
 
-    while current_date <= end_date:
-        date_tuples.append((current_date.strftime("%Y"), current_date.strftime("%m")))
-        # Increment the month and set the date to the 1st
-        if current_date.month == 12:
-            current_date = current_date.replace(year=current_date.year + 1, month=1, day=1)
-        else:
-            current_date = current_date.replace(month=current_date.month + 1, day=1)
+            logger.info("Requesting CDS URL for %s %s-%s ...", var_code, year, month_str)
+            url = _extract_download_url(client, dataset, request)
+            if url is None:
+                logger.warning("Skipping %s %s-%s — no URL obtained", var_code, year, month_str)
+                continue
 
-    iter_product = list(itertools.product(date_tuples, variables))
+            with open(url_file, "a") as fp:
+                fp.write(url + "\n")
+                fp.write(f"  dir={output_dir}\n")
+                fp.write(f"  out={filename}\n")
 
-    # Check if output_dir exists, create if it doesn't
-    if not os.path.exists(output_dir):
-        logger.info(f"Output directory {output_dir} does not exist. Creating it...")
-        os.makedirs(output_dir)
-        logger.info(f"Created output directory {output_dir}")
+            expected_files.append(filepath)
 
-    request = dict()
-    request["product_type"] = product_type
-    request["format"] = format
-    request["day"] = [f"{i:02}" for i in range(1, 32)]
-    request["area"] = bounds_nwse
+    if not expected_files:
+        logger.warning("No download URLs were obtained — nothing to download")
+        return []
 
-    for (year, month), variable in iter_product:
-        if variable_code_dict is not None:
-            variable_code = variable_code_dict[variable]
-        request["variable"] = [variable]
-        request["year"] = [year]
-        request["month"] = [month]
+    _download_via_aria2c(url_file, output_dir, max_connections=max_connections)
 
-        filename = f"{region.upper()}_{year}_{month}_{variable_code}.{extension}"
-        output_path = os.path.join(output_dir, filename)
+    # Clean up the URL file
+    if os.path.exists(url_file):
+        os.remove(url_file)
 
-        if os.path.exists(output_path) and overwrite:
-            logger.warning(f"File {filename} already exists in the output directory. Overwriting...")
-        elif os.path.exists(output_path) and not overwrite:
-            logger.warning(f"File {filename} already exists in the output directory. Skipping...")
-            continue
+    # Return only files that actually exist on disk
+    downloaded = [f for f in expected_files if os.path.exists(f)]
+    logger.info("Downloaded %d/%d files", len(downloaded), len(expected_files))
+    return downloaded
 
-        logger.info(f"Downloading {filename} to {output_dir}")
-        try:
-            client.retrieve(dataset, request, output_path)
-            logger.info(f"Downloaded {filename} to {output_dir}")
-        except HTTPError as e:
-            logger.warning(f"Failed to download {filename}: {str(e).replace(os.linesep, ' ')!s}")
-            continue
-        except Exception as e:
-            logger.error(f"Failed to download {filename}: {str(e).replace(os.linesep, ' ')!s}")
-            raise
 
+# ---------------------------------------------------------------------------
+# Fetch + index + upload pipeline
+# ---------------------------------------------------------------------------
 def fetch_and_upload_cds_data(
     yaml_path: Path,
     log_level: str = "DEBUG",
     current_month: bool = True,
+    backfill_start: str | None = None,
+    backfill_end: str | None = None,
     log_filename: Union[str, None] = None,
-    ) -> tuple[bool, int, datetime]:
-    """
-    Process CDS ERA5 daily data
+) -> tuple[bool, int, datetime]:
+    """Download ERA5-Land data, generate Kerchunk indexes, upload to S3.
+
+    :param Path yaml_path:
+        Path to the YAML configuration file.
+    :param str log_level:
+        Logging level.  Default ``"DEBUG"``.
+    :param bool current_month:
+        If ``True``, download the current month to-date.
+    :param str | None backfill_start:
+        Start date ``YYYY-MM`` for backfill mode.
+    :param str | None backfill_end:
+        End date ``YYYY-MM`` for backfill mode.
+    :returns:
+        ``(upload_success, total_files, latest_timestamp)``
     """
     params = get_params(yaml_path=yaml_path)
-    cds_params = params['cds']
-    shared_params = params['shared_params']
-
-    # Remove the logging configuration here since it's handled by CLI
-    # We don't want to override the parent configuration
+    cds_params = params["cds"]
+    shared_params = params["shared_params"]
 
     latest_timestamp, _ = last_date_of_cds_data()
 
-    if current_month:
-        start_date = latest_timestamp.strftime("%Y-%m-01")
-        end_date = latest_timestamp.strftime("%Y-%m-%d")
-        cds_params["start_date"] = start_date
-        cds_params["end_date"] = end_date
+    # ── Determine which (year, months) to download ────────────────────────
+    year_months: list[tuple[int, list[int]]] = []
 
-    upload_successes = []
-    total_no_files = 0
-
-    for _i, region in enumerate(cds_params['bounds_nwse'].keys()):
-        s3_prefix = f"{cds_params['ds_id']}-{cds_params['ds_name']}/{cds_params['folder_name']}/{region.upper()}"
-        local_region_dir = Path(shared_params['local_data_dir']).expanduser() / Path(shared_params['s3_bucket']) / Path(s3_prefix)
-        local_region_dir.mkdir(parents=True, exist_ok=True)
-        retrieve_data_from_cds(bounds_nwse=cds_params['bounds_nwse'][region], variables=list(cds_params['variables'].keys()),
-                               output_dir=local_region_dir,
-                               start_date=cds_params["start_date"], end_date=cds_params["end_date"],
-                               variable_code_dict = cds_params['variables'], region=region,
-                               check_credentials=False
-                              )
-
-        no_files = len(list(local_region_dir.glob(f'*.{cds_params["extension"]}')))
-        upload_success = upload_data_to_s3(upload_dir=local_region_dir, Bucket=shared_params['s3_bucket'],
-                                                     Prefix=s3_prefix, extension=cds_params['extension'])
-
-        upload_successes.append(upload_success)
-        total_no_files += no_files
-
-    if all(upload_successes):
-        return True, total_no_files, latest_timestamp
+    if backfill_start and backfill_end:
+        # Backfill mode: iterate year-months in range
+        start = datetime.strptime(backfill_start, "%Y-%m")
+        end = datetime.strptime(backfill_end, "%Y-%m")
+        current = start
+        while current <= end:
+            yr = current.year
+            # Collect all months for this year in range
+            months_for_year = []
+            while current.year == yr and current <= end:
+                months_for_year.append(current.month)
+                if current.month == 12:
+                    current = current.replace(year=current.year + 1, month=1)
+                else:
+                    current = current.replace(month=current.month + 1)
+            year_months.append((yr, months_for_year))
+    elif current_month:
+        # Update mode: just the current month
+        year_months = [(latest_timestamp.year, [latest_timestamp.month])]
     else:
-        return False, total_no_files, latest_timestamp
+        # Custom dates from YAML
+        start = datetime.strptime(cds_params["start_date"], "%Y-%m-%d")
+        end = datetime.strptime(cds_params["end_date"], "%Y-%m-%d")
+        current = start
+        while current <= end:
+            yr = current.year
+            months_for_year = []
+            while current.year == yr and current <= end:
+                months_for_year.append(current.month)
+                if current.month == 12:
+                    current = current.replace(year=current.year + 1, month=1)
+                else:
+                    current = current.replace(month=current.month + 1)
+            year_months.append((yr, months_for_year))
 
+    # ── Resolve config ────────────────────────────────────────────────────
+    variables: dict[str, str] = cds_params["variables"]
+    area = cds_params.get("bounds_nwse", {})
+    # Use the first (and only) bounding box entry
+    area_values = list(area.values())[0] if area else DEFAULT_AREA
+    dataset = cds_params.get("cds_dataset_name", DEFAULT_DATASET)
+    max_workers = cds_params.get("max_workers", 12)
+
+    s3_bucket = shared_params["s3_bucket"]
+    s3_prefix = f"{cds_params['ds_id']}-{cds_params['ds_name']}/{cds_params['folder_name']}"
+
+    total_files = 0
+    all_success = True
+
+    # ── Download → Index → Upload ─────────────────────────────────────────
+    for year, months in year_months:
+        with TemporaryDirectory(prefix="indra_cds_") as tmp_dir:
+            logger.info("Processing year=%d months=%s", year, months)
+
+            nc_files = retrieve_era5_land(
+                year=year,
+                months=months,
+                variables=variables,
+                output_dir=tmp_dir,
+                area=area_values,
+                dataset=dataset,
+                max_connections=max_workers,
+                check_credentials=False,
+            )
+
+            if not nc_files:
+                logger.warning("No files downloaded for year=%d months=%s", year, months)
+                continue
+
+            # Generate Kerchunk JSON index for each NC file
+            for nc_path in nc_files:
+                try:
+                    generate_kerchunk_index(nc_path)
+                except Exception:
+                    logger.exception("Failed to generate Kerchunk index for %s", nc_path)
+
+            # Upload both .nc and .json files
+            nc_upload_failures = upload_data_to_s3(
+                upload_dir=tmp_dir,
+                Bucket=s3_bucket,
+                Prefix=s3_prefix,
+                extension="nc",
+            )
+            json_upload_failures = upload_data_to_s3(
+                upload_dir=tmp_dir,
+                Bucket=s3_bucket,
+                Prefix=s3_prefix,
+                extension="json",
+            )
+
+            n_nc = len(nc_files)
+            total_files += n_nc
+            if nc_upload_failures > 0 or json_upload_failures > 0:
+                all_success = False
+
+    return all_success, total_files, latest_timestamp
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
@@ -373,67 +425,86 @@ def main(
             exists=True,
             dir_okay=False,
             resolve_path=True,
-            help="Path to YAML configuration file containing CDS parameters"
-        )
+            help="Path to YAML configuration file containing CDS parameters",
+        ),
     ],
     current_month: Annotated[
         bool,
         typer.Option(
             "--current-month/--custom-date",
             "-c/-C",
-            help="Use current month for date range, or use dates from config"
-        )
+            help="Use current month for date range, or use dates from config",
+        ),
     ] = True,
+    backfill_start: Annotated[
+        Optional[str],
+        typer.Option(
+            "--backfill-start",
+            "-bs",
+            help="Start year-month for backfill mode (YYYY-MM)",
+        ),
+    ] = None,
+    backfill_end: Annotated[
+        Optional[str],
+        typer.Option(
+            "--backfill-end",
+            "-be",
+            help="End year-month for backfill mode (YYYY-MM)",
+        ),
+    ] = None,
     debug: Annotated[
         bool,
         typer.Option(
             "--debug/--no-debug",
             "-d/-D",
-            help="Enable debug mode, send email without actually downloading data"
-        )
+            help="Enable debug mode, send email without actually downloading data",
+        ),
     ] = False,
     debug_upload_success: Annotated[
         bool,
         typer.Option(
             "--debug-upload-success/--no-debug-upload-success",
             "-u/-U",
-            help="When debug mode is enabled, what should the upload_success be set to. If True, run will simulate a successful upload."
-        )
-    ] = False
+            help="When debug mode is enabled, simulate a successful upload.",
+        ),
+    ] = False,
 ) -> None:
-    """Process and upload CDS ERA5 daily data to S3.
-    Fetches ERA5 reanalysis data from the Climate Data Store (CDS) and uploads it to S3.
-    Uses the configuration from the provided YAML file for data parameters, S3 settings, and notification recipients.
+    """Fetch ERA5-Land data from CDS and upload to S3.
+
+    Downloads monthly NetCDF files via aria2c, generates Kerchunk JSON
+    indexes, and uploads both to S3.  Supports update mode (current month)
+    and backfill mode (historical date range).
     """
-    # Get the parent app's logging configuration
     parent_config = ctx.obj or {}
 
     params = get_params(yaml_path=yaml_path)
-    email_recipients = params['shared_params']['email_recipients']
-    cds_params = params['cds']
+    email_recipients = params["shared_params"]["email_recipients"]
+    cds_params = params["cds"]
 
     report = Report(
         job_name="CDS Daily Job",
-        email_recipients=email_recipients
+        email_recipients=email_recipients,
     )
 
     try:
-        # Use the parent's logging configuration
         if not debug:
+            # Determine mode
+            is_backfill = backfill_start is not None and backfill_end is not None
             upload_success, no_files, latest_timestamp = fetch_and_upload_cds_data(
                 yaml_path=yaml_path,
-                current_month=current_month,
+                current_month=current_month and not is_backfill,
+                backfill_start=backfill_start,
+                backfill_end=backfill_end,
                 log_level=parent_config.get("log_level", "INFO"),
-                log_filename=parent_config.get("log_file")
+                log_filename=parent_config.get("log_file"),
             )
-
         else:
             upload_success = debug_upload_success
             no_files = 0
             latest_timestamp = datetime.now()
 
-        dataset_name = cds_params['ds_name'].replace('_', ' ')
-        dataset_source = cds_params['ds_source']
+        dataset_name = cds_params["ds_name"].replace("_", " ")
+        dataset_source = cds_params["ds_source"]
         current_date = datetime.now().strftime("%Y-%m-%d")
         current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -442,11 +513,11 @@ def main(
                 f"All {no_files} files obtained from {dataset_name} "
                 f"on {dataset_source} have been successfully uploaded to S3 on {current_date}.\n"
                 f"The last timestamp of data availability for {dataset_name} is {latest_timestamp} UTC, "
-                f"when checked at approximately {current_timestamp} UTC."
+                f"when checked at approximately {current_timestamp} UTC. "
                 f"Detailed health of the run can be found in the debug log file for the "
                 f"current month on the server: logs/{parent_config.get('log_file')}"
             )
-            report.add_a_status_report('CDS Upload', Status.SUCCESS, message)
+            report.add_a_status_report("CDS Upload", Status.SUCCESS, message)
         else:
             message = (
                 f"One or more files from {dataset_name} "
@@ -455,17 +526,25 @@ def main(
                 f"when checked at approximately {current_timestamp} UTC.\n"
                 f"Detailed health of the run can be found in the attached debug log file."
             )
-            report.add_a_status_report('CDS Upload', Status.CRITICAL, message)
+            report.add_a_status_report("CDS Upload", Status.CRITICAL, message)
 
     except Exception as e:
-        report.add_a_status_report('General', Status.CRITICAL, f'Exception raised: {e}')
+        report.add_a_status_report("General", Status.CRITICAL, f"Exception raised: {e}")
 
     finally:
         if report.any_criticals():
             report.add_attachment(f'logs/{parent_config.get("log_file")}')
         report.send_email()
 
+
 if __name__ == "__main__":
     app()
 
-__all__ = ["app", "check_cds_credentials", "fetch_and_upload_cds_data", "last_date_of_cds_data", "main", "retrieve_data_from_cds"]
+__all__ = [
+    "app",
+    "check_cds_credentials",
+    "fetch_and_upload_cds_data",
+    "last_date_of_cds_data",
+    "main",
+    "retrieve_era5_land",
+]
