@@ -64,7 +64,8 @@ def last_date_of_cds_data(suppress_output=True):
         client = cdsapi.Client()
         std_op = ""
 
-    output_dir = TemporaryDirectory().name
+    tmp = TemporaryDirectory()
+    output_dir = tmp.name
 
     current_date = datetime.now()
     request = {
@@ -317,8 +318,13 @@ def fetch_and_upload_cds_data(
 
     if backfill_start and backfill_end:
         # Backfill mode: iterate year-months in range
-        start = datetime.strptime(backfill_start, "%Y-%m")
-        end = datetime.strptime(backfill_end, "%Y-%m")
+        try:
+            start = datetime.strptime(backfill_start, "%Y-%m")
+            end = datetime.strptime(backfill_end, "%Y-%m")
+        except ValueError as e:
+            raise ValueError(f"Invalid date format. Use YYYY-MM: {e}") from e
+        if start > end:
+            raise ValueError(f"backfill_start ({backfill_start}) must be <= backfill_end ({backfill_end})")
         current = start
         while current <= end:
             yr = current.year
@@ -487,9 +493,13 @@ def main(
     )
 
     try:
+        is_backfill = backfill_start is not None and backfill_end is not None
+        if (backfill_start is None) != (backfill_end is None):
+            raise typer.BadParameter(
+                "Both --backfill-start and --backfill-end must be provided together"
+            )
+
         if not debug:
-            # Determine mode
-            is_backfill = backfill_start is not None and backfill_end is not None
             upload_success, no_files, latest_timestamp = fetch_and_upload_cds_data(
                 yaml_path=yaml_path,
                 current_month=current_month and not is_backfill,

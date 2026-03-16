@@ -41,7 +41,7 @@ def generate_kerchunk_index(nc_path: str, json_path: str | None = None) -> str:
         index = h5chunks.translate()
 
     os.makedirs(os.path.dirname(json_path) or ".", exist_ok=True)
-    with open(json_path, "w") as fp:
+    with open(json_path, "w", encoding="utf-8") as fp:
         ujson.dump(index, fp)
 
     logger.info("Kerchunk index written: %s", json_path)
