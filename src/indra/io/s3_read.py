@@ -1,15 +1,8 @@
-"""Download files from S3 to local filesystem.
-
-Provides a thin wrapper around boto3 for pulling raw data (NetCDF, GeoJSON)
-from S3 to a local directory. Used by the CoS module to fetch ERA5 .nc files
-and region shapefiles on demand.
-"""
-
 import logging
 import os
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, NoCredentialsError
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +29,8 @@ def download_from_s3(
         The *local_path* the file was written to.
     :raises FileNotFoundError:
         If the S3 key does not exist.
+    :raises PermissionError:
+        If AWS credentials are missing or invalid.
     :raises ClientError:
         On any other S3/boto3 error.
     """
@@ -52,6 +47,12 @@ def download_from_s3(
 
     try:
         client.download_file(Bucket=bucket, Key=key, Filename=local_path)
+    except NoCredentialsError as exc:
+        raise PermissionError(
+            "AWS credentials not found. Configure them via environment variables "
+            "(AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY), ~/.aws/credentials, "
+            "or an IAM role."
+        ) from exc
     except ClientError as exc:
         error_code = exc.response.get("Error", {}).get("Code", "")
         if error_code in ("404", "NoSuchKey"):

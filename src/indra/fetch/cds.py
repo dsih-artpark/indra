@@ -78,29 +78,30 @@ def last_date_of_cds_data(suppress_output=True):
         "area": [12, 76, 11, 77],  # tiny probe area
     }
 
-    try:
-        client.retrieve(DEFAULT_DATASET, request, output_dir)
-    except HTTPError as e:
-        error_msg = str(e)
-        if error_msg.startswith("401"):
-            logger.error("Access to CDS API is not authorized. Check your credentials.")
-            raise
-        elif "latest date available" in error_msg.lower() or error_msg.startswith("400"):
-            import re
-            match = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})", error_msg)
-            if match:
-                latest_timestamp = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M")
-                logger.info("Latest timestamp on CDS: %s", latest_timestamp.strftime("%Y-%m-%d %H:%M"))
-                return latest_timestamp, std_op
+    with TemporaryDirectory() as output_dir:
+        try:
+            client.retrieve(DEFAULT_DATASET, request, output_dir)
+        except HTTPError as e:
+            error_msg = str(e)
+            if error_msg.startswith("401"):
+                logger.error("Access to CDS API is not authorized. Check your credentials.")
+                raise
+            elif "latest date available" in error_msg.lower() or error_msg.startswith("400"):
+                import re
+                match = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})", error_msg)
+                if match:
+                    latest_timestamp = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M")
+                    logger.info("Latest timestamp on CDS: %s", latest_timestamp.strftime("%Y-%m-%d %H:%M"))
+                    return latest_timestamp, std_op
+                else:
+                    logger.error("Failed to parse latest date from CDS error: %s", error_msg)
+                    raise ValueError("Could not find YYYY-MM-DD HH:MM in CDS API error response")
             else:
-                logger.error("Failed to parse latest date from CDS error: %s", error_msg)
-                raise ValueError("Could not find YYYY-MM-DD HH:MM in CDS API error response")
-        else:
-            logger.error("Failed to retrieve data from CDS: %s", error_msg)
+                logger.error("Failed to retrieve data from CDS: %s", error_msg)
+                raise
+        except Exception as e:
+            logger.error("Failed to retrieve data from CDS: %s", str(e).replace(os.linesep, " "))
             raise
-    except Exception as e:
-        logger.error("Failed to retrieve data from CDS: %s", str(e).replace(os.linesep, " "))
-        raise
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +238,8 @@ def retrieve_era5_land(
     os.makedirs(output_dir, exist_ok=True)
 
     url_file = os.path.join(output_dir, "_aria2c_urls.txt")
+    # Truncate any leftover URL file from a prior interrupted run
+    open(url_file, "w").close()
     expected_files: list[str] = []
 
     for var_full, var_code in variables.items():
@@ -354,8 +357,25 @@ def fetch_and_upload_cds_data(
         year_months = [(latest_timestamp.year, [latest_timestamp.month])]
     else:
         # Custom dates from YAML
-        start = datetime.strptime(cds_params["start_date"], "%Y-%m-%d")
-        end = datetime.strptime(cds_params["end_date"], "%Y-%m-%d")
+        raw_start = cds_params.get("start_date", "")
+        raw_end = cds_params.get("end_date", "")
+        if not raw_start or str(raw_start).lower() in ("none", "null", ""):
+            raise typer.BadParameter(
+                "Config 'cds.start_date' is not set. "
+                "Provide a YYYY-MM-DD date or use --current-month / --backfill."
+            )
+        if not raw_end or str(raw_end).lower() in ("none", "null", ""):
+            raise typer.BadParameter(
+                "Config 'cds.end_date' is not set. "
+                "Provide a YYYY-MM-DD date or use --current-month / --backfill."
+            )
+        try:
+            start = datetime.strptime(str(raw_start), "%Y-%m-%d")
+            end = datetime.strptime(str(raw_end), "%Y-%m-%d")
+        except ValueError as exc:
+            raise typer.BadParameter(
+                f"Invalid date format in config (expected YYYY-MM-DD): {exc}"
+            ) from exc
         current = start
         while current <= end:
             yr = current.year
@@ -577,8 +597,15 @@ def main(
         report.add_a_status_report("General", Status.CRITICAL, f"Exception raised: {e}")
 
     finally:
-        if report.any_criticals():
-            report.add_attachment(f'logs/{parent_config.get("log_file")}')
+        log_file = parent_config.get("log_file")
+        if report.any_criticals() and log_file:
+            log_path = f"logs/{log_file}"
+            if os.path.exists(log_path):
+                report.add_attachment(log_path)
+            else:
+                logger.warning(
+                    "Log file not found for attachment: %s", log_path
+                )
         report.send_email()
 
 
