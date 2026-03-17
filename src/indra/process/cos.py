@@ -25,6 +25,7 @@ import typer
 import xarray as xr
 
 from indra.io import get_params
+from indra.io.kerchunk_index import generate_kerchunk_index, open_virtual_dataset
 from indra.io.s3_read import download_from_s3
 from indra.process.idw import idw_interpolate
 
@@ -50,7 +51,7 @@ VARIABLE_META = {
 def _resolve_nc_keys(config: dict) -> tuple[str, str]:
     """Return (s3_prefix, file_pattern) for ERA5 NetCDF files on S3."""
     era5_cfg = config.get("era5", {})
-    file_pattern = era5_cfg.get("file_pattern", "era5_sfc_{variable}_{year}.nc")
+    file_pattern = era5_cfg.get("file_pattern", "era5_land_{variable}_{year}_{month}.nc")
 
     # Build base prefix
     if era5_cfg.get("s3_prefix"):
@@ -124,32 +125,84 @@ def _determine_nc_files(
 ) -> list[str]:
     """Return the list of NetCDF filenames for a date range.
 
-    Generates one file per variable per **year** that overlaps the date range.
-    For example, a query from 2024-06-01 to 2025-03-31 with variables
-    ["tp", "t2m"] would produce 4 files (2 vars × 2 years).
+    Supports file patterns with ``{year}``, ``{month}``, and ``{variable}``
+    placeholders (with or without format specs like ``:02d``).
+    When ``{month}`` is present the function generates one file per variable
+    per **month** that overlaps the date range; otherwise it generates one
+    file per variable per **year**.
+
+    Examples
+    --------
+    Pattern ``era5_land_{variable}_{year}_{month}.nc`` with dates
+    2024-11-01 to 2025-02-28 and variables ["tp"] produces::
+
+        era5_land_tp_2024_11.nc
+        era5_land_tp_2024_12.nc
+        era5_land_tp_2025_01.nc
+        era5_land_tp_2025_02.nc
     """
-    has_var_placeholder = "{variable}" in file_pattern
+    import re
+
+    # Detect placeholders using regex so we catch {month:02d} etc.
+    placeholders = set(re.findall(r"\{(\w+)", file_pattern))
+    has_var_placeholder = "variable" in placeholders
+    has_month_placeholder = "month" in placeholders
+
+    # Normalize the pattern: strip format specs (e.g. {month:02d} -> {month})
+    # so we can pass pre-formatted values directly.
+    normalized_pattern = re.sub(r"\{(\w+)(:[^}]*)?\}", r"{\1}", file_pattern)
+
+    # Warn about and remove unknown placeholders so .format() doesn't crash.
+    known = {"year", "month", "variable"}
+    unknown = placeholders - known
+    if unknown:
+        logger.warning(
+            "Unknown placeholder(s) %s in file_pattern — stripping them. "
+            "Supported placeholders: {year}, {month}, {variable}.",
+            unknown,
+        )
+        for ph in unknown:
+            normalized_pattern = normalized_pattern.replace(f"{{{ph}}}", "")
+
     if has_var_placeholder and not variables:
         raise ValueError(
             "file_pattern contains '{variable}' placeholder but no variables "
             "were provided. Pass a variables list or use a pattern without "
             "'{variable}'."
         )
+
     files: list[str] = []
     seen: set[str] = set()  # avoid duplicates
 
-    for year in range(start.year, end.year + 1):
+    def _add(fmt_kwargs: dict) -> None:
         if has_var_placeholder and variables:
             for var in variables:
-                fname = file_pattern.format(year=year, variable=var)
+                fname = normalized_pattern.format(**fmt_kwargs, variable=var)
                 if fname not in seen:
                     files.append(fname)
                     seen.add(fname)
         else:
-            fname = file_pattern.format(year=year)
+            fname = normalized_pattern.format(**fmt_kwargs)
             if fname not in seen:
                 files.append(fname)
                 seen.add(fname)
+
+    if has_month_placeholder:
+        # Iterate month-by-month across the date range
+        cur = start.replace(day=1)
+        end_month = end.replace(day=1)
+        while cur <= end_month:
+            _add({"year": cur.year, "month": f"{cur.month:02d}"})
+            # Advance to next month
+            if cur.month == 12:
+                cur = cur.replace(year=cur.year + 1, month=1)
+            else:
+                cur = cur.replace(month=cur.month + 1)
+    else:
+        # Iterate year-by-year
+        for year in range(start.year, end.year + 1):
+            _add({"year": year})
+
     return files
 
 
@@ -235,9 +288,11 @@ def cos_command(
         None, "--output", "-o",
         help="Output CSV path.  Default: ./output/<region>_<start>_<end>.csv",
     ),
-    local: Optional[List[str]] = typer.Option(
-        None, "--local", "-L",
-        help="Path(s) to local NetCDF file(s). Repeatable. Skips S3 download for ERA5 data.",
+    local_dir: Optional[str] = typer.Option(
+        None, "--local-dir", "-L",
+        help="Path to a local directory containing NetCDF files. "
+             "Files are auto-discovered using the config file_pattern, "
+             "date range, and variables. Skips S3 download.",
     ),
     local_shapefile: Optional[str] = typer.Option(
         None, "--local-shapefile",
@@ -345,34 +400,87 @@ def cos_command(
         )
 
         # ── NetCDF files ─────────────────────────────────────────────────────
-        if local:
-            # Use local files directly — skip S3
+        _prefix, file_pattern = _resolve_nc_keys(config)
+        nc_filenames = _determine_nc_files(
+            dt_start, dt_end, file_pattern,
+            variables=variables,
+        )
+        logger.info("Expected NetCDF files: %s", nc_filenames)
+
+        if local_dir:
+            # Resolve files from local directory
+            if not os.path.isdir(local_dir):
+                raise typer.BadParameter(f"Local directory not found: {local_dir}")
+
             nc_paths: list[str] = []
-            for path in local:
-                if not os.path.exists(path):
-                    raise typer.BadParameter(f"Local NetCDF file not found: {path}")
-                nc_paths.append(path)
-            logger.info("Using %d local NetCDF file(s)", len(nc_paths))
+            missing: list[str] = []
+            for fname in nc_filenames:
+                fpath = os.path.join(local_dir, fname)
+                if os.path.exists(fpath):
+                    nc_paths.append(fpath)
+                else:
+                    missing.append(fname)
+
+            if missing:
+                logger.warning(
+                    "Missing %d file(s) in %s: %s",
+                    len(missing), local_dir, missing,
+                )
+            if not nc_paths:
+                raise typer.BadParameter(
+                    f"No matching NetCDF files found in {local_dir} "
+                    f"for the requested date range and variables."
+                )
+            logger.info("Using %d local NetCDF file(s) from %s", len(nc_paths), local_dir)
         else:
             # Download from S3
-            s3_prefix, file_pattern = _resolve_nc_keys(config)
             bucket = config["shared_params"]["s3_bucket"]
-            nc_filenames = _determine_nc_files(
-                dt_start, dt_end, file_pattern,
-                variables=variables,
-            )
-
             nc_paths = []
             for fname in nc_filenames:
-                s3_key = f"{s3_prefix}/{fname}"
+                s3_key = f"{_prefix}/{fname}"
                 local_nc = os.path.join(tmp_dir, fname)
                 download_from_s3(bucket=bucket, key=s3_key, local_path=local_nc)
                 nc_paths.append(local_nc)
 
             logger.info("Downloaded %d NetCDF file(s)", len(nc_paths))
 
+        # ── JIT Kerchunk indexing ─────────────────────────────────────────────
+        json_paths: list[str] = []
+        kerchunk_ok = True
+        for nc_path in nc_paths:
+            json_path = os.path.splitext(nc_path)[0] + ".json"
+            if not os.path.exists(json_path):
+                logger.info("Generating Kerchunk index for %s", os.path.basename(nc_path))
+                try:
+                    generate_kerchunk_index(nc_path, json_path)
+                except Exception:
+                    logger.exception(
+                        "Failed to generate Kerchunk index for %s — "
+                        "will fall back to direct NetCDF read",
+                        nc_path,
+                    )
+                    kerchunk_ok = False
+                    break
+            else:
+                logger.debug("Kerchunk index already exists: %s", json_path)
+            json_paths.append(json_path)
+
         # ── Open & slice dataset ─────────────────────────────────────────────
-        ds = xr.open_mfdataset(nc_paths, engine="netcdf4", combine="by_coords")
+        if kerchunk_ok and json_paths:
+            # Open each Kerchunk JSON as a lazy virtual dataset, then combine.
+            logger.info("Opening %d file(s) via Kerchunk virtual datasets", len(json_paths))
+            try:
+                virtual_datasets = [open_virtual_dataset(jp) for jp in json_paths]
+                ds = xr.combine_by_coords(virtual_datasets, combine_attrs="drop_conflicts")
+            except Exception:
+                logger.exception(
+                    "Failed to open virtual datasets — falling back to direct NetCDF read"
+                )
+                ds = xr.open_mfdataset(nc_paths, engine="netcdf4", combine="by_coords")
+        else:
+            # Fallback: open NetCDF files directly
+            logger.info("Opening %d file(s) via direct NetCDF read", len(nc_paths))
+            ds = xr.open_mfdataset(nc_paths, engine="netcdf4", combine="by_coords")
 
         # Normalize time dimension name: ERA5 web downloads use "valid_time",
         # CDS API downloads use "time".  Standardise to "time".

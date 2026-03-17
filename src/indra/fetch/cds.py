@@ -26,7 +26,7 @@ import typer
 from requests.exceptions import HTTPError
 
 from indra.emails import Report, Status
-from indra.io import generate_kerchunk_index, get_params, upload_data_to_s3
+from indra.io import get_params, upload_data_to_s3
 
 logger = logging.getLogger(__name__)
 logging.captureWarnings(True)
@@ -70,7 +70,7 @@ def last_date_of_cds_data(suppress_output=True):
     current_date = datetime.now()
     request = {
         "product_type": "reanalysis",
-        "format": "netcdf",
+        "data_format": "netcdf",
         "day": [current_date.strftime("%d")],
         "month": [current_date.strftime("%m")],
         "year": [current_date.strftime("%Y")],
@@ -85,11 +85,16 @@ def last_date_of_cds_data(suppress_output=True):
         if error_msg.startswith("401"):
             logger.error("Access to CDS API is not authorized. Check your credentials.")
             raise
-        elif error_msg.startswith("400"):
-            latest_timestamp_msg = error_msg.split(".")[-1].strip()
-            latest_timestamp = datetime.strptime(latest_timestamp_msg[-16:-1], "%Y-%m-%d %H:%M")
-            logger.info("Latest timestamp on CDS: %s", latest_timestamp.strftime("%Y-%m-%d %H:%M"))
-            return latest_timestamp, std_op
+        elif "latest date available" in error_msg.lower() or error_msg.startswith("400"):
+            import re
+            match = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})", error_msg)
+            if match:
+                latest_timestamp = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M")
+                logger.info("Latest timestamp on CDS: %s", latest_timestamp.strftime("%Y-%m-%d %H:%M"))
+                return latest_timestamp, std_op
+            else:
+                logger.error("Failed to parse latest date from CDS error: %s", error_msg)
+                raise ValueError("Could not find YYYY-MM-DD HH:MM in CDS API error response")
         else:
             logger.error("Failed to retrieve data from CDS: %s", error_msg)
             raise
@@ -291,6 +296,8 @@ def fetch_and_upload_cds_data(
     backfill_start: str | None = None,
     backfill_end: str | None = None,
     log_filename: Union[str, None] = None,
+    no_upload: bool = False,
+    output_dir: str | None = None,
 ) -> tuple[bool, int, datetime]:
     """Download ERA5-Land data, generate Kerchunk indexes, upload to S3.
 
@@ -304,6 +311,11 @@ def fetch_and_upload_cds_data(
         Start date ``YYYY-MM`` for backfill mode.
     :param str | None backfill_end:
         End date ``YYYY-MM`` for backfill mode.
+    :param bool no_upload:
+        If ``True``, skip S3 upload and keep files locally.  Default ``False``.
+    :param str | None output_dir:
+        Directory to save downloaded files when skipping upload.  Only used
+        when ``no_upload=True``.  Defaults to ``./output/cds_downloads``.
     :returns:
         ``(upload_success, total_files, latest_timestamp)``
     """
@@ -372,14 +384,24 @@ def fetch_and_upload_cds_data(
 
     # ── Download → Index → Upload ─────────────────────────────────────────
     for year, months in year_months:
-        with TemporaryDirectory(prefix="indra_cds_") as tmp_dir:
-            logger.info("Processing year=%d months=%s", year, months)
+        # If skipping upload, keep files in a persistent directory; otherwise
+        # use a TemporaryDirectory that auto-cleans after upload.
+        if no_upload:
+            local_dir = output_dir or os.path.join("output", "cds_downloads")
+            os.makedirs(local_dir, exist_ok=True)
+            ctx_manager = None
+        else:
+            ctx_manager = TemporaryDirectory(prefix="indra_cds_")
+            local_dir = ctx_manager.__enter__()
+
+        try:
+            logger.info("Processing year=%d months=%s → %s", year, months, local_dir)
 
             nc_files = retrieve_era5_land(
                 year=year,
                 months=months,
                 variables=variables,
-                output_dir=tmp_dir,
+                output_dir=local_dir,
                 area=area_values,
                 dataset=dataset,
                 max_connections=max_workers,
@@ -390,38 +412,31 @@ def fetch_and_upload_cds_data(
                 logger.warning("No files downloaded for year=%d months=%s", year, months)
                 continue
 
-            # Generate Kerchunk JSON index for each NC file
-            for nc_path in nc_files:
-                try:
-                    generate_kerchunk_index(nc_path)
-                except Exception:
-                    logger.exception("Failed to generate Kerchunk index for %s", nc_path)
 
-            # Upload both .nc and .json files
-            nc_upload_failures = upload_data_to_s3(
-                upload_dir=tmp_dir,
-                Bucket=s3_bucket,
-                Prefix=s3_prefix,
-                extension="nc",
-            )
-            json_upload_failures = upload_data_to_s3(
-                upload_dir=tmp_dir,
-                Bucket=s3_bucket,
-                Prefix=s3_prefix,
-                extension="json",
-            )
+            total_files += len(nc_files)
 
-            n_nc = len(nc_files)
-            total_files += n_nc
-            if nc_upload_failures > 0 or json_upload_failures > 0:
-                all_success = False
+            if no_upload:
+                logger.info(
+                    "--no-upload set: skipping S3 upload. Files saved to: %s", local_dir
+                )
+            else:
+                # Upload .nc files
+                nc_upload_failures = upload_data_to_s3(
+                    upload_dir=local_dir,
+                    Bucket=s3_bucket,
+                    Prefix=s3_prefix,
+                    extension="nc",
+                )
+                if nc_upload_failures > 0:
+                    all_success = False
+        finally:
+            if ctx_manager is not None:
+                ctx_manager.__exit__(None, None, None)
 
     return all_success, total_files, latest_timestamp
 
 
-# ---------------------------------------------------------------------------
 # CLI entry point
-# ---------------------------------------------------------------------------
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
@@ -474,6 +489,23 @@ def main(
             help="When debug mode is enabled, simulate a successful upload.",
         ),
     ] = False,
+    no_upload: Annotated[
+        bool,
+        typer.Option(
+            "--no-upload",
+            "-noup",
+            help="Skip S3 upload. Files are kept locally (see --output-dir).",
+        ),
+    ] = False,
+    output_dir: Annotated[
+        Optional[str],
+        typer.Option(
+            "--output-dir",
+            "-o",
+            help="Directory to save downloaded files when --no-upload is set. "
+                 "Defaults to ./output/cds_downloads.",
+        ),
+    ] = None,
 ) -> None:
     """Fetch ERA5-Land data from CDS and upload to S3.
 
@@ -507,6 +539,8 @@ def main(
                 backfill_end=backfill_end,
                 log_level=parent_config.get("log_level", "INFO"),
                 log_filename=parent_config.get("log_file"),
+                no_upload=no_upload,
+                output_dir=output_dir,
             )
         else:
             upload_success = debug_upload_success
@@ -539,6 +573,7 @@ def main(
             report.add_a_status_report("CDS Upload", Status.CRITICAL, message)
 
     except Exception as e:
+        logger.exception("CDS fetch failed: %s", e)
         report.add_a_status_report("General", Status.CRITICAL, f"Exception raised: {e}")
 
     finally:

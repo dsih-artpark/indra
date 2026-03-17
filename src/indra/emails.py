@@ -41,7 +41,15 @@ class Report:
         else:
             self.run_date = run_date
 
-        self.email_addresses = [email.split('<')[1].split('>')[0] for email in email_recipients]
+        if isinstance(email_recipients, str):
+            email_recipients = [email_recipients]
+
+        def extract_email(email: str) -> str:
+            if '<' in email and '>' in email:
+                return email.split('<')[1].split('>')[0]
+            return email.strip()
+
+        self.email_addresses = [extract_email(email) for email in email_recipients]
         self.email_recipients = ", ".join(email_recipients)
 
 

@@ -1,7 +1,7 @@
 shared_params:
   local_data_dir: "~/.dsih-data/"
   email_recipients:
-    "User <user@example.com>"
+    - "User <user@example.com>"
   s3_bucket: 'example-bucket-name'
 
 cds:
