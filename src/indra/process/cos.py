@@ -483,9 +483,19 @@ def cos_command(
                 if local_dir:
                     virtual_datasets = [open_virtual_dataset(jp) for jp in json_paths]
                 else:
+                    aws_region = (
+                        config.get("shared_params", {}).get("aws_region")
+                        or os.environ.get("AWS_DEFAULT_REGION")
+                        or os.environ.get("AWS_REGION")
+                        or "ap-south-1"
+                    )
+                    s3_storage_opts = {
+                        "anon": False,
+                        "client_kwargs": {"region_name": aws_region},
+                    }
                     virtual_datasets = [
                         open_virtual_dataset(
-                            jp, target_protocol="s3", storage_options={"anon": False}
+                            jp, target_protocol="s3", storage_options=s3_storage_opts
                         )
                         for jp in json_paths
                     ]
