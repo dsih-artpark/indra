@@ -7,6 +7,13 @@ from botocore.exceptions import ClientError, NoCredentialsError
 logger = logging.getLogger(__name__)
 
 
+def _safe_remove(path: str) -> None:
+    """Remove a file if it exists, swallowing OSErrors."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
 def download_from_s3(
     *,
     bucket: str,
@@ -45,21 +52,29 @@ def download_from_s3(
     client = boto3.client("s3")
     logger.info("Downloading s3://%s/%s → %s", bucket, key, local_path)
 
+    tmp_path = local_path + ".tmp"
     try:
-        client.download_file(Bucket=bucket, Key=key, Filename=local_path)
+        client.download_file(Bucket=bucket, Key=key, Filename=tmp_path)
     except NoCredentialsError as exc:
+        _safe_remove(tmp_path)
         raise PermissionError(
             "AWS credentials not found. Configure them via environment variables "
             "(AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY), ~/.aws/credentials, "
             "or an IAM role."
         ) from exc
     except ClientError as exc:
+        _safe_remove(tmp_path)
         error_code = exc.response.get("Error", {}).get("Code", "")
         if error_code in ("404", "NoSuchKey"):
             raise FileNotFoundError(
                 f"S3 key not found: s3://{bucket}/{key}"
             ) from exc
         raise
+    except Exception:
+        _safe_remove(tmp_path)
+        raise
+
+    os.replace(tmp_path, local_path)
 
     logger.info("Download complete: %s", local_path)
     return local_path

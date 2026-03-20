@@ -12,8 +12,8 @@ cds:
     "2m_temperature": "2t"
     "2m_dewpoint_temperature": "2d"
     "total_precipitation": "tp"
-  start_date: None  # Will be set automatically if using --current-month
-  end_date: None    # Will be set automatically if using --current-month
+  start_date: null  # Will be set automatically if using --current-month
+  end_date: null    # Will be set automatically if using --current-month
   ds_id: 'MW0016DS0046'
   ds_name: "ERA5_Land"
   folder_name: "all_india_netcdf"

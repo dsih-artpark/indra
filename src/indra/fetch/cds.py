@@ -27,6 +27,7 @@ from requests.exceptions import HTTPError
 
 from indra.emails import Report, Status
 from indra.io import get_params, upload_data_to_s3
+from indra.io.kerchunk_index import generate_kerchunk_index
 
 logger = logging.getLogger(__name__)
 logging.captureWarnings(True)
@@ -64,8 +65,6 @@ def last_date_of_cds_data(suppress_output=True):
         client = cdsapi.Client()
         std_op = ""
 
-    tmp = TemporaryDirectory()
-    output_dir = tmp.name
 
     current_date = datetime.now()
     request = {
@@ -81,6 +80,14 @@ def last_date_of_cds_data(suppress_output=True):
     with TemporaryDirectory() as output_dir:
         try:
             client.retrieve(DEFAULT_DATASET, request, output_dir)
+            # Success: the requested date is available — use it as the latest timestamp.
+            latest_timestamp = datetime(
+                int(request["year"][0]),
+                int(request["month"][0]),
+                int(request["day"][0]),
+            )
+            logger.info("CDS probe succeeded — latest timestamp: %s", latest_timestamp)
+            return latest_timestamp, std_op
         except HTTPError as e:
             error_msg = str(e)
             if error_msg.startswith("401"):
@@ -172,6 +179,7 @@ def _download_via_aria2c(url_file: str, output_dir: str, max_connections: int = 
         "aria2c",
         "--input-file", url_file,
         "--dir", output_dir,
+        "--max-concurrent-downloads", str(max_connections),
         "--max-connection-per-server", str(max_connections),
         "--split", str(max_connections),
         "--min-split-size", "1M",
@@ -205,8 +213,9 @@ def retrieve_era5_land(
     """Download monthly ERA5-Land NetCDF files via aria2c.
 
     For each ``(variable, month)`` combination, a CDS request is made to
-    obtain the download URL.  All URLs are batched into a single aria2c
-    invocation for fast parallel downloads.
+    obtain the download URL.  All URLs are collected in parallel using a
+    thread pool, then batched into a single aria2c invocation for fast
+    parallel downloads.
 
     :param int year:
         Year to download.
@@ -228,26 +237,28 @@ def retrieve_era5_land(
     :returns:
         List of downloaded ``.nc`` file paths.
     """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     if area is None:
         area = DEFAULT_AREA
 
     if check_credentials:
         check_cds_credentials(get_latest_date=False)
 
-    client = cdsapi.Client()
     os.makedirs(output_dir, exist_ok=True)
 
     url_file = os.path.join(output_dir, "_aria2c_urls.txt")
     # Truncate any leftover URL file from a prior interrupted run
     open(url_file, "w").close()
-    expected_files: list[str] = []
 
+    # Build the list of tasks
+    tasks = []
     for var_full, var_code in variables.items():
         for month in months:
             month_str = f"{month:02d}"
             filename = f"era5_land_{var_code}_{year}_{month_str}.nc"
             filepath = os.path.join(output_dir, filename)
-
             request = {
                 "product_type": "reanalysis",
                 "variable": var_full,
@@ -259,19 +270,39 @@ def retrieve_era5_land(
                 "time": [f"{h:02d}:00" for h in range(24)],
                 "area": area,
             }
+            tasks.append((var_code, month_str, filename, filepath, request))
 
-            logger.info("Requesting CDS URL for %s %s-%s ...", var_code, year, month_str)
-            url = _extract_download_url(client, dataset, request)
-            if url is None:
-                logger.warning("Skipping %s %s-%s — no URL obtained", var_code, year, month_str)
-                continue
+    # Thread-local CDS clients + lock for shared file writes
+    _file_lock = threading.Lock()
+    _thread_local = threading.local()
+    expected_files: list[str] = []
+    _expected_lock = threading.Lock()
 
+    def _fetch_url(task):
+        var_code, month_str, filename, filepath, request = task
+        # Each thread gets its own CDS client (requests.Session is not thread-safe)
+        if not hasattr(_thread_local, "client"):
+            _suppress_out = io.StringIO()
+            _suppress_err = io.StringIO()
+            with redirect_stdout(_suppress_out), redirect_stderr(_suppress_err):
+                _thread_local.client = cdsapi.Client()
+
+        logger.info("Requesting CDS URL for %s %s-%s ...", var_code, year, month_str)
+        url = _extract_download_url(_thread_local.client, dataset, request)
+        if url is None:
+            logger.warning("Skipping %s %s-%s — no URL obtained", var_code, year, month_str)
+            return
+
+        with _file_lock:
             with open(url_file, "a") as fp:
                 fp.write(url + "\n")
                 fp.write(f"  dir={output_dir}\n")
                 fp.write(f"  out={filename}\n")
-
+        with _expected_lock:
             expected_files.append(filepath)
+
+    with ThreadPoolExecutor(max_workers=max_connections) as executor:
+        list(executor.map(_fetch_url, tasks))
 
     if not expected_files:
         logger.warning("No download URLs were obtained — nothing to download")
@@ -432,8 +463,21 @@ def fetch_and_upload_cds_data(
                 logger.warning("No files downloaded for year=%d months=%s", year, months)
                 continue
 
-
             total_files += len(nc_files)
+
+            # ── Generate Kerchunk indexes locally ─────────────────────────
+            kerchunk_dir = os.path.join(local_dir, "kerchunk_indices")
+            os.makedirs(kerchunk_dir, exist_ok=True)
+            for nc_file in nc_files:
+                nc_basename = os.path.splitext(os.path.basename(nc_file))[0]
+                json_path = os.path.join(kerchunk_dir, f"{nc_basename}.json")
+                try:
+                    generate_kerchunk_index(nc_file, json_path)
+                except Exception:
+                    logger.exception(
+                        "Failed to generate Kerchunk index for %s — skipping",
+                        nc_file,
+                    )
 
             if no_upload:
                 logger.info(
@@ -448,6 +492,16 @@ def fetch_and_upload_cds_data(
                     extension="nc",
                 )
                 if nc_upload_failures > 0:
+                    all_success = False
+
+                # Upload Kerchunk JSON indexes
+                json_upload_failures = upload_data_to_s3(
+                    upload_dir=kerchunk_dir,
+                    Bucket=s3_bucket,
+                    Prefix=f"{s3_prefix}/kerchunk_indices",
+                    extension="json",
+                )
+                if json_upload_failures > 0:
                     all_success = False
         finally:
             if ctx_manager is not None:

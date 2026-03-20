@@ -32,6 +32,12 @@ def generate_kerchunk_index(nc_path: str, json_path: str | None = None) -> str:
         The path the JSON index was written to.
     """
     if json_path is None:
+        if "://" in nc_path:
+            raise ValueError(
+                f"nc_path is a remote URL ({nc_path.split('://')[0]}://...) "
+                "but no explicit json_path was provided. Please supply a local "
+                "or writable json_path for the Kerchunk index output."
+            )
         json_path = os.path.splitext(nc_path)[0] + ".json"
 
     logger.info("Generating Kerchunk index: %s → %s", nc_path, json_path)

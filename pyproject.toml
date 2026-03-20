@@ -8,7 +8,7 @@ readme = "README.md"
 license = "GPL-3.0-or-later"
 dependencies = [
     "typer>=0.15.2,<0.16",
-    "boto3>=1.37.18,<2",
+    "boto3",
     "cdsapi>=0.7.5,<0.8",
     "pandas>=2.2.3,<3",
     "netcdf4>=1.7.2,<2",
@@ -20,6 +20,13 @@ dependencies = [
     "python-dotenv>=1.0.1,<2",
     "playwright>=1.44.0,<2",
     "dask>=2026.1.2",
+    "s3fs>=2024.0.0",
+    "kerchunk",
+    "ujson",
+    "zarr<3",
+    "xarray",
+    "h5py",
+    "h5netcdf",
 ]
 
 [project.scripts]

@@ -57,7 +57,9 @@ def idw_interpolate(
         d = haversine(target_lat, target_lon, grid_lats[i], grid_lons[i])
         if d <= radius_km:
             if d < 1e-10:  # target coincides with a grid point
-                return float(grid_values[i]), 1
+                if not np.isnan(grid_values[i]):
+                    return float(grid_values[i]), 1
+                continue  # skip NaN coincident point
             w = 1.0 / (d ** power)
             weights.append(w)
             values.append(grid_values[i])

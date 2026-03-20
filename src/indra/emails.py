@@ -80,7 +80,7 @@ class Report:
         # Determine if email sending is possible
         missing_env = [k for k, v in {
             'SMTP_SERVER': self.SMTP_SERVER,
-            'PORT': self.PORT,
+            'PORT': port_str,
             'EMAIL': self.EMAIL,
             'PASSWORD': self.PASSWORD,
         }.items() if not v]
@@ -163,14 +163,22 @@ class Report:
             logger.error(f"Failed to attach file {filepath}: {e}")
             raise
 
-    def send_email(self):
-        """Send the collated report via SMTP. No-ops gracefully if email is disabled."""
+    def send_email(self, raise_on_error: bool = False) -> bool:
+        """Send the collated report via SMTP.
+
+        No-ops gracefully if email is disabled.
+
+        :param bool raise_on_error:
+            If ``True``, re-raise the exception after logging.  Default ``False``.
+        :returns:
+            ``True`` on successful send, ``False`` on failure or if disabled.
+        """
         if not self.email_enabled:
             logger.info(
                 "Email notifications are disabled (missing recipients or SMTP config). "
                 "Skipping email send."
             )
-            return
+            return False
 
         text = self.collate_report_entries()
         try:
@@ -180,10 +188,15 @@ class Report:
                 server.login(self.EMAIL, self.PASSWORD)
                 server.sendmail(self.EMAIL, self.email_addresses, text)
                 logger.info("Email sent successfully")
-        except Exception:
+                return True
+        except Exception as e:
             logger.exception(
-                "Failed to send email — the fetch job result is unaffected by this."
+                "Failed to send email to %s via %s:%s — %s",
+                self.email_addresses, self.SMTP_SERVER, self.PORT, e,
             )
+            if raise_on_error:
+                raise
+            return False
 
     def any_criticals(self):
         return any([report.status == Status.CRITICAL for report in self.reports])

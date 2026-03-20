@@ -25,7 +25,7 @@ import typer
 import xarray as xr
 
 from indra.io import get_params
-from indra.io.kerchunk_index import generate_kerchunk_index, open_virtual_dataset
+from indra.io.kerchunk_index import open_virtual_dataset
 from indra.io.s3_read import download_from_s3
 from indra.process.idw import idw_interpolate
 
@@ -433,54 +433,87 @@ def cos_command(
                 )
             logger.info("Using %d local NetCDF file(s) from %s", len(nc_paths), local_dir)
         else:
-            # Download from S3
+            # S3 mode — download pre-built Kerchunk indexes, stream data
             bucket = config["shared_params"]["s3_bucket"]
-            nc_paths = []
-            for fname in nc_filenames:
-                s3_key = f"{_prefix}/{fname}"
-                local_nc = os.path.join(tmp_dir, fname)
-                download_from_s3(bucket=bucket, key=s3_key, local_path=local_nc)
-                nc_paths.append(local_nc)
 
-            logger.info("Downloaded %d NetCDF file(s)", len(nc_paths))
-
-        # ── JIT Kerchunk indexing ─────────────────────────────────────────────
+        # ── Load pre-built Kerchunk indexes ───────────────────────────────────
         json_paths: list[str] = []
         kerchunk_ok = True
-        for nc_path in nc_paths:
-            json_path = os.path.splitext(nc_path)[0] + ".json"
-            if not os.path.exists(json_path):
-                logger.info("Generating Kerchunk index for %s", os.path.basename(nc_path))
+
+        if local_dir:
+            # Look for kerchunk_indices/ subfolder inside the local directory
+            kerchunk_subdir = os.path.join(local_dir, "kerchunk_indices")
+            for fname in nc_filenames:
+                basename = os.path.splitext(fname)[0] + ".json"
+                json_path = os.path.join(kerchunk_subdir, basename)
+                if os.path.exists(json_path):
+                    json_paths.append(json_path)
+                else:
+                    logger.debug("No pre-built index for %s", fname)
+            if not json_paths:
+                logger.info("No pre-built Kerchunk indexes found in %s", kerchunk_subdir)
+                kerchunk_ok = False
+            else:
+                logger.info("Found %d pre-built Kerchunk index(es) in %s", len(json_paths), kerchunk_subdir)
+        else:
+            # Download pre-built JSON indexes from S3
+            for fname in nc_filenames:
+                basename = os.path.splitext(fname)[0] + ".json"
+                s3_key = f"{_prefix}/kerchunk_indices/{basename}"
+                local_json = os.path.join(tmp_dir, basename)
                 try:
-                    generate_kerchunk_index(nc_path, json_path)
+                    download_from_s3(bucket=bucket, key=s3_key, local_path=local_json)
+                    json_paths.append(local_json)
                 except Exception:
-                    logger.exception(
-                        "Failed to generate Kerchunk index for %s — "
-                        "will fall back to direct NetCDF read",
-                        nc_path,
+                    logger.warning(
+                        "Pre-built Kerchunk index not found on S3: %s — "
+                        "will fall back to full download",
+                        s3_key,
                     )
                     kerchunk_ok = False
                     break
-            else:
-                logger.debug("Kerchunk index already exists: %s", json_path)
-            json_paths.append(json_path)
+
+            if kerchunk_ok:
+                logger.info("Downloaded %d pre-built Kerchunk index(es) from S3", len(json_paths))
 
         # ── Open & slice dataset ─────────────────────────────────────────────
         if kerchunk_ok and json_paths:
-            # Open each Kerchunk JSON as a lazy virtual dataset, then combine.
             logger.info("Opening %d file(s) via Kerchunk virtual datasets", len(json_paths))
             try:
-                virtual_datasets = [open_virtual_dataset(jp) for jp in json_paths]
+                if local_dir:
+                    virtual_datasets = [open_virtual_dataset(jp) for jp in json_paths]
+                else:
+                    virtual_datasets = [
+                        open_virtual_dataset(
+                            jp, target_protocol="s3", storage_options={"anon": False}
+                        )
+                        for jp in json_paths
+                    ]
                 ds = xr.combine_by_coords(virtual_datasets, combine_attrs="drop_conflicts")
             except Exception:
                 logger.exception(
                     "Failed to open virtual datasets — falling back to direct NetCDF read"
                 )
+                kerchunk_ok = False
+
+        if not kerchunk_ok or not json_paths:
+            # Fallback: open local files directly, or download full files from S3
+            if local_dir:
+                logger.info("Opening %d file(s) via direct NetCDF read", len(nc_paths))
                 ds = xr.open_mfdataset(nc_paths, engine="netcdf4", combine="by_coords")
-        else:
-            # Fallback: open NetCDF files directly
-            logger.info("Opening %d file(s) via direct NetCDF read", len(nc_paths))
-            ds = xr.open_mfdataset(nc_paths, engine="netcdf4", combine="by_coords")
+            else:
+                logger.warning(
+                    "Falling back to full S3 download for %d file(s)", len(nc_filenames)
+                )
+                nc_paths_fallback: list[str] = []
+                for fname in nc_filenames:
+                    s3_key = f"{_prefix}/{fname}"
+                    local_nc = os.path.join(tmp_dir, fname)
+                    download_from_s3(bucket=bucket, key=s3_key, local_path=local_nc)
+                    nc_paths_fallback.append(local_nc)
+                ds = xr.open_mfdataset(
+                    nc_paths_fallback, engine="netcdf4", combine="by_coords"
+                )
 
         # Normalize time dimension name: ERA5 web downloads use "valid_time",
         # CDS API downloads use "time".  Standardise to "time".
@@ -536,10 +569,23 @@ def cos_command(
 
         # ERA5 lats can be ascending or descending
         lats = ds["latitude"].values
+        ds_lat_min, ds_lat_max = float(lats.min()), float(lats.max())
+        ds_lon_min, ds_lon_max = float(ds["longitude"].values.min()), float(ds["longitude"].values.max())
+
         if lats[0] > lats[-1]:
             ds = ds.sel(latitude=slice(lat_max, lat_min), longitude=slice(lon_min, lon_max))
         else:
             ds = ds.sel(latitude=slice(lat_min, lat_max), longitude=slice(lon_min, lon_max))
+
+        # Validate that the spatial slice produced a non-empty grid
+        if ds.sizes["latitude"] == 0 or ds.sizes["longitude"] == 0:
+            raise typer.BadParameter(
+                f"Shapefile region is out of bounds of the ERA5 data.\n"
+                f"  Shapefile extent (with {radius_km}km buffer): "
+                f"lat [{lat_min:.2f}, {lat_max:.2f}], lon [{lon_min:.2f}, {lon_max:.2f}]\n"
+                f"  ERA5 data extent: "
+                f"lat [{ds_lat_min:.2f}, {ds_lat_max:.2f}], lon [{ds_lon_min:.2f}, {ds_lon_max:.2f}]"
+            )
 
         # ── Temporal aggregation ─────────────────────────────────────────────
         if aggregation == "daily":
