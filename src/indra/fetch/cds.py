@@ -470,9 +470,14 @@ def fetch_and_upload_cds_data(
             os.makedirs(kerchunk_dir, exist_ok=True)
             for nc_file in nc_files:
                 nc_basename = os.path.splitext(os.path.basename(nc_file))[0]
+                nc_filename = os.path.basename(nc_file)
                 json_path = os.path.join(kerchunk_dir, f"{nc_basename}.json")
+                # Embed the S3 URL in the index so remote readers can find the data.
+                # Without this, the local temp path gets baked in and the index
+                # becomes unusable for Kerchunk-based S3 streaming.
+                s3_target_url = f"s3://{s3_bucket}/{s3_prefix}/{nc_filename}"
                 try:
-                    generate_kerchunk_index(nc_file, json_path)
+                    generate_kerchunk_index(nc_file, json_path, target_url=s3_target_url)
                 except Exception:
                     logger.exception(
                         "Failed to generate Kerchunk index for %s — skipping",

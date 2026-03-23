@@ -499,6 +499,14 @@ def cos_command(
                         )
                         for jp in json_paths
                     ]
+                # Kerchunk/Zarr stores a numcodecs.JSON codec in encoding
+                # which contains an unpicklable _json.Scanner C object.
+                # Clear encoding so combine_by_coords' deepcopy doesn't choke.
+                for vds in virtual_datasets:
+                    for var in vds.data_vars:
+                        vds[var].encoding.clear()
+                    for coord in vds.coords:
+                        vds[coord].encoding.clear()
                 ds = xr.combine_by_coords(virtual_datasets, combine_attrs="drop_conflicts")
             except Exception:
                 logger.exception(
