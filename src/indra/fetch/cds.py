@@ -293,13 +293,19 @@ def retrieve_era5_land(
             logger.warning("Skipping %s %s-%s — no URL obtained", var_code, year, month_str)
             return
 
-        with _file_lock:
-            with open(url_file, "a") as fp:
-                fp.write(url + "\n")
-                fp.write(f"  dir={output_dir}\n")
-                fp.write(f"  out={filename}\n")
-        with _expected_lock:
-            expected_files.append(filepath)
+        try:
+            with _file_lock:
+                with open(url_file, "a") as fp:
+                    fp.write(url + "\n")
+                    fp.write(f"  dir={output_dir}\n")
+                    fp.write(f"  out={filename}\n")
+            with _expected_lock:
+                expected_files.append(filepath)
+        except OSError:
+            logger.exception(
+                "Failed to write URL entry for %s %s-%s (url_file=%s)",
+                var_code, year, month_str, url_file,
+            )
 
     with ThreadPoolExecutor(max_workers=max_connections) as executor:
         list(executor.map(_fetch_url, tasks))

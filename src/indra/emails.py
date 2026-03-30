@@ -80,7 +80,7 @@ class Report:
         # Determine if email sending is possible
         missing_env = [k for k, v in {
             'SMTP_SERVER': self.SMTP_SERVER,
-            'PORT': port_str,
+            'PORT': self.PORT,
             'EMAIL': self.EMAIL,
             'PASSWORD': self.PASSWORD,
         }.items() if not v]
@@ -189,10 +189,11 @@ class Report:
                 server.sendmail(self.EMAIL, self.email_addresses, text)
                 logger.info("Email sent successfully")
                 return True
-        except Exception as e:
+        except Exception:
+            recipient_summary = f"{len(self.email_addresses)} recipient(s)"
             logger.exception(
-                "Failed to send email to %s via %s:%s — %s",
-                self.email_addresses, self.SMTP_SERVER, self.PORT, e,
+                "Failed to send email to %s via %s:%s",
+                recipient_summary, self.SMTP_SERVER, self.PORT,
             )
             if raise_on_error:
                 raise

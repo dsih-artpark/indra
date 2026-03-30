@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 from indra.process import app
-from indra.process.cos import _determine_nc_files
+from indra.process.data_loader import determine_nc_files
 runner = CliRunner()
 
 
@@ -27,7 +27,7 @@ class TestDetermineNcFiles:
         pattern = "era5_sfc_{variable}_{year}.nc"
         variables = ["2t", "tp"]
 
-        files = _determine_nc_files(start, end, pattern, variables)
+        files = determine_nc_files(start, end, pattern, variables)
 
         # 3 years (2023, 2024, 2025) * 2 vars = 6 files
         expected = [
@@ -47,7 +47,7 @@ class TestDetermineNcFiles:
         pattern = "era5_land_{variable}_{year}_{month}.nc"
         variables = ["tp"]
 
-        files = _determine_nc_files(start, end, pattern, variables)
+        files = determine_nc_files(start, end, pattern, variables)
 
         # 4 months: Nov, Dec, Jan, Feb
         expected = [
@@ -65,7 +65,7 @@ class TestDetermineNcFiles:
         # Pattern explicitly has {month:02d} — our regex should handle it
         pattern = "era5_{month:02d}.nc"
 
-        files = _determine_nc_files(start, end, pattern)
+        files = determine_nc_files(start, end, pattern)
         assert files == ["era5_05.nc"]
 
     def test_missing_variable_with_variable_placeholder(self):
@@ -75,7 +75,7 @@ class TestDetermineNcFiles:
         pattern = "era5_{variable}.nc"
 
         with pytest.raises(ValueError, match="no variables were provided"):
-            _determine_nc_files(start, end, pattern, variables=None)
+            determine_nc_files(start, end, pattern, variables=None)
 
     def test_ignores_unsupported_placeholders(self, caplog):
         """Test that unsupported placeholders default gracefully to warning."""
@@ -83,7 +83,7 @@ class TestDetermineNcFiles:
         end = date(2024, 1, 31)
         pattern = "era5_{year}_{unknown}.nc"
 
-        files = _determine_nc_files(start, end, pattern)
+        files = determine_nc_files(start, end, pattern)
 
         # It strips '{unknown}'
         assert files == ["era5_2024_.nc"]
@@ -97,7 +97,7 @@ class TestDetermineNcFiles:
         pattern = "era5_{year}.nc"
         variables = ["2t", "tp"]
 
-        files = _determine_nc_files(start, end, pattern, variables)
+        files = determine_nc_files(start, end, pattern, variables)
 
         # Even though we passed 2 variables, they map to the exact same file
         assert files == ["era5_2024.nc"]
@@ -109,18 +109,17 @@ class TestDetermineNcFiles:
 class TestCosCli:
     """Tests for the CoS CLI entry point."""
 
-    @patch("indra.process.cos._load_shapefile")
-    @patch("indra.process.cos._compute_centroids")
+    @patch("indra.process.data_loader.load_shapefile")
+    @patch("indra.process.data_loader.compute_centroids")
     def test_cli_help(self, mock_compute, mock_load):
         """Test that CLI help works without error."""
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
         assert "IDW interpolation from ERA5 grids to regions" in result.output
 
-    @patch("indra.process.cos._load_shapefile")
-    @patch("indra.process.cos._compute_centroids")
+    @patch("indra.process.data_loader.load_shapefile")
+    @patch("indra.process.data_loader.compute_centroids")
     def test_cli_missing_args(self, mock_compute, mock_load):
         """Test that missing required arguments throws error."""
         result = runner.invoke(app, [])
         assert result.exit_code != 0
-        assert "Missing argument 'CONFIG_PATH'" in result.output

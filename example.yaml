@@ -45,6 +45,14 @@ era5:
   file_pattern: "era5_land_{variable}_{year}_{month}.nc"
   index_pattern: "era5_land_{variable}_{year}_{month}.json"
 
+# IMD grid configuration (used by analysis module)
+imd:
+  s3_prefix: "MW0018DS0052-IMD_Grid/gridded_data"
+  file_pattern: "imd_{variable}_{year}.nc"
+  variables:
+    "relative_humidity": "rh"
+    "rainfall": "rain"
+
 # Region profiles — add a block per city/granularity
 regions:
   bengaluru-zones:
