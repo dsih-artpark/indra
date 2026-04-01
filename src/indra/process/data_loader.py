@@ -19,6 +19,7 @@ from typing import Optional
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import typer
 import xarray as xr
 
@@ -547,10 +548,22 @@ def _normalize_dataset(ds: xr.Dataset) -> xr.Dataset:
 def _deaccumulate_vars(ds: xr.Dataset) -> xr.Dataset:
     """Convert cumulative variables to instantaneous hourly increments.
 
-    ERA5 accumulated fields (e.g. ``tp``) reset at 00:00 and 12:00 UTC
-    each day.  Within each 12-hour forecast cycle the values are monotonically
-    increasing, so the **hourly increment** is ``value[t] - value[t-1]``.
-    Negative diffs (at reset points) are clipped to zero.
+    ERA5-Land accumulated fields (e.g. ``tp``) are cumulative within
+    forecast cycles that reset once every 24 hours.  Within each cycle
+    the values increase monotonically; the **hourly increment** is simply
+    ``value[t] - value[t-1]``.
+
+    Cycle resets are detected **dynamically** by finding timesteps where
+    the value drops relative to the previous timestep (i.e. ``diff < 0``).
+    At a reset point the raw value is already the first hour's increment
+    from the new cycle, so it is kept as-is rather than being diffed
+    against the prior cycle's final accumulation.
+
+    Special handling for the first timestep: if the second value drops
+    below the first, the first timestep is the tail of a previous cycle
+    and its raw value would be an entire cycle's accumulated total — far
+    too large for a single hour — so it is zeroed.  Otherwise the first
+    value is kept as the initial increment.
 
     The de-accumulation is applied *once*, right after loading, so all
     downstream consumers (CoS IDW, analyze engine, bandpass plugin, etc.)
@@ -576,16 +589,46 @@ def _deaccumulate_vars(ds: xr.Dataset) -> xr.Dataset:
     new_vars = {}
     for var in vars_to_deaccum:
         da = ds[var]
-        # Compute forward difference along time; first step keeps its value
-        # (it's the increment from the start of the forecast cycle to hour 1).
-        diff = da.diff(dim="time")
-        # Clip negative values caused by cycle resets to zero
-        diff = diff.clip(min=0)
-        # Prepend the first original value as the first increment
-        first_step = da.isel(time=0).expand_dims(time=[da.time.values[0]])
-        new_vars[var] = xr.concat([first_step, diff], dim="time")
+        vals = da.values  # shape: (time, ...) or (time, lat, lon)
+
+        # Compute forward differences along the time axis
+        diffs = np.diff(vals, axis=0)  # shape: (time-1, ...)
+
+        # Detect cycle resets: where the value drops (diff < 0).
+        # Use a small negative threshold to tolerate float noise.
+        is_reset = diffs < -1e-9  # True at each reset point
+
+        # At reset points the raw post-reset value IS the hourly
+        # increment (first accumulation step of the new cycle).
+        # At non-reset points the diff is the hourly increment.
+        # Build the result array for timesteps 1..N.
+        raw_post = vals[1:]  # raw values at t=1..N
+        hourly = np.where(is_reset, raw_post, diffs)
+
+        # Safety: clip any residual negatives from float noise
+        hourly = np.maximum(hourly, 0)
+
+        # Handle first timestep: if the next value drops below it,
+        # this timestep is the tail of a previous cycle (e.g. 00:00
+        # holds the 24h accumulated total from yesterday).  Zero it
+        # out since we cannot properly de-accumulate without the
+        # prior cycle's data.  Otherwise keep it as the first
+        # increment of a new cycle.
+        first_is_cycle_tail = np.any(diffs[0] < -1e-9)
+        if first_is_cycle_tail:
+            first_val = np.zeros_like(vals[0])
+        else:
+            first_val = vals[0]
+
+        result = np.concatenate(
+            [first_val[np.newaxis, ...], hourly], axis=0
+        )
+
+        new_vars[var] = da.copy(data=result)
+        n_resets = int(np.sum(np.any(is_reset.reshape(is_reset.shape[0], -1), axis=-1)))
         logger.info(
-            "De-accumulated '%s': %d timesteps, values clipped at 0.", var, da.sizes["time"]
+            "De-accumulated '%s': %d timesteps, %d cycle resets detected.",
+            var, da.sizes["time"], n_resets,
         )
 
     return ds.assign(new_vars)
