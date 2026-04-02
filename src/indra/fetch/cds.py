@@ -102,7 +102,7 @@ def last_date_of_cds_data(suppress_output=True):
                     return latest_timestamp, std_op
                 else:
                     logger.error("Failed to parse latest date from CDS error: %s", error_msg)
-                    raise ValueError("Could not find YYYY-MM-DD HH:MM in CDS API error response")
+                    raise ValueError("Could not find YYYY-MM-DD HH:MM in CDS API error response") from None
             else:
                 logger.error("Failed to retrieve data from CDS: %s", error_msg)
                 raise

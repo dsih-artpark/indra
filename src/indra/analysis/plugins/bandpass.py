@@ -7,11 +7,20 @@ Identifies active and break monsoon phases by:
 4. Classifying phases using ±σ thresholds
 
 Based on the methodology in ``eda/Active_break_days_of_monsoon.ipynb``.
+
+.. note:: Dask / lazy arrays
+   This plugin requires **in-memory (non-dask) arrays**.  The internal
+   functions (``_process_single_timeseries``, ``_bandpass_filter``) convert
+   the data to NumPy/pandas for FFT-based bandpass filtering and
+   climatology groupby operations that are inherently eager.  If a dask-
+   backed DataArray is passed to ``active_break_monsoon``, it will be
+   eagerly computed (with a logged warning) before processing.
 """
 
 import calendar
 import logging
 
+import dask.array as dask_array
 import numpy as np
 import pandas as pd
 import scipy.fftpack
@@ -79,19 +88,51 @@ def active_break_monsoon(
     5. Classify timesteps as **active** (filtered > +σ × threshold) or
        **break** (filtered < −σ × threshold).
 
+    .. note::
+       Only **in-memory** (non-dask) arrays are supported.  If *da* is
+       backed by a dask array it will be eagerly computed before processing.
+       See ``_process_single_timeseries`` for why: the per-point loop uses
+       NumPy FFT and pandas groupby, which require materialized data.
+
     :param da: Daily precipitation DataArray with a ``time`` dimension.
-    :param low_period: Shortest period for bandpass (days). Default ``30``.
-    :param high_period: Longest period for bandpass (days). Default ``90``.
-    :param threshold_sigma: Standard deviation multiplier. Default ``0.5``.
+    :param low_period: Shortest period for bandpass (days). Must be > 0 and
+        less than *high_period*. Default ``30``.
+    :param high_period: Longest period for bandpass (days). Must be > 0 and
+        greater than *low_period*. Default ``90``.
+    :param threshold_sigma: Standard deviation multiplier. Must be >= 0.
+        Default ``0.5``.
     :param season_months: Months to analyze. Default ``[6, 7, 8, 9]`` (JJAS).
     :returns: Dataset with ``active`` and ``break_spell`` boolean variables.
+    :raises ValueError: If bandpass parameters are invalid.
     """
+    # ---- Validate parameters (fail fast before any computation) ----
+    if low_period <= 0:
+        raise ValueError(f"low_period must be > 0, got {low_period}")
+    if high_period <= 0:
+        raise ValueError(f"high_period must be > 0, got {high_period}")
+    if low_period >= high_period:
+        raise ValueError(
+            f"low_period ({low_period}) must be < high_period ({high_period})"
+        )
+    if threshold_sigma < 0:
+        raise ValueError(
+            f"threshold_sigma must be >= 0, got {threshold_sigma}"
+        )
+
     if season_months is None:
         season_months = [6, 7, 8, 9]
 
     # Ensure we have a time dimension
     if "time" not in da.dims:
         raise ValueError("DataArray must have a 'time' dimension.")
+
+    # Eagerly compute dask arrays — this plugin requires in-memory data
+    if isinstance(da.data, dask_array.Array):
+        logger.warning(
+            "Dask-backed DataArray detected — eagerly computing before "
+            "bandpass analysis. This may use significant memory."
+        )
+        da = da.compute()
 
     # Convert to daily if sub-daily
     if da.sizes["time"] > 0:
@@ -161,6 +202,13 @@ def _process_single_timeseries(
 
     Returns (active_flags, break_flags) as float arrays (1.0/0.0)
     aligned with the input time dimension.
+
+    .. note::
+       This function materialises *da* via ``.values`` and ``.to_series()``
+       because it relies on NumPy FFT (``scipy.fftpack``) and pandas
+       ``groupby`` for climatology computation.  It therefore requires an
+       **in-memory** DataArray — dask arrays must be computed before
+       calling this function (handled by ``active_break_monsoon``).
     """
     times = da["time"].values
     values = da.values.astype(float)

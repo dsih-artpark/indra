@@ -81,9 +81,9 @@ def _parse_metric(name: str, raw: dict) -> MetricDefinition:
 
     :param name: Metric name (YAML key).
     :param raw: Metric configuration dict.
-    :raises ValueError: On missing required fields.
+    :raises ValueError: On missing required fields or invalid types.
     """
-    # Handle 'variable' (singular) as well as 'variables' (list)
+    # ── variables: accept str, list, tuple; reject anything else ──────────
     variables = raw.get("variables", [])
     if not variables:
         var_singular = raw.get("variable")
@@ -97,16 +97,50 @@ def _parse_metric(name: str, raw: dict) -> MetricDefinition:
                     f"Metric '{name}': 'variable' must be a string or list, "
                     f"got {type(var_singular).__name__}: {var_singular!r}"
                 )
+    elif isinstance(variables, str):
+        # 'variables: tp' in YAML → string; normalize to list
+        variables = [variables]
+    elif isinstance(variables, (list, tuple)):
+        variables = list(variables)
+    else:
+        raise ValueError(
+            f"Metric '{name}': 'variables' must be a list or string, "
+            f"got {type(variables).__name__}: {variables!r}"
+        )
+
+    # ── base_aggregation: must be dict or absent/None ────────────────────
+    base_aggregation = raw.get("base_aggregation")
+    if base_aggregation is not None and not isinstance(base_aggregation, dict):
+        raise ValueError(
+            f"Metric '{name}': 'base_aggregation' must be a mapping or null, "
+            f"got {type(base_aggregation).__name__}: {base_aggregation!r}"
+        )
+
+    # ── reduce: must be a dict ───────────────────────────────────────────
+    reduce = raw.get("reduce", {"frequency": "monthly", "method": "count"})
+    if not isinstance(reduce, dict):
+        raise ValueError(
+            f"Metric '{name}': 'reduce' must be a mapping, "
+            f"got {type(reduce).__name__}: {reduce!r}"
+        )
+
+    # ── params: must be a dict ───────────────────────────────────────────
+    params = raw.get("params", {})
+    if not isinstance(params, dict):
+        raise ValueError(
+            f"Metric '{name}': 'params' must be a mapping, "
+            f"got {type(params).__name__}: {params!r}"
+        )
 
     return MetricDefinition(
         name=name,
         description=raw.get("description", ""),
         variables=variables,
-        base_aggregation=raw.get("base_aggregation"),
+        base_aggregation=base_aggregation,
         condition=raw.get("condition"),
-        reduce=raw.get("reduce", {"frequency": "monthly", "method": "count"}),
+        reduce=reduce,
         plugin=raw.get("plugin"),
-        params=raw.get("params", {}),
+        params=params,
     )
 
 
