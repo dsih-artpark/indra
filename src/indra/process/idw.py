@@ -47,8 +47,10 @@ def idw_interpolate(
     :param float radius_km: Search radius in km.  Default ``25``.
     :param float power: IDW power parameter.  Default ``2``.
     :returns:
-        ``(interpolated_value, n_points_used)``.  Returns ``(NaN, 0)``
-        if no grid points fall within the radius.
+        ``(interpolated_value, n_in_radius)``.  *n_in_radius* is the count of
+        grid points that fell within *radius_km*, regardless of NaN status —
+        it reflects spatial coverage.  Returns ``(NaN, 0)`` if no grid points
+        fall within the radius.
     """
     weights: list[float] = []
     values: list[float] = []
@@ -72,6 +74,6 @@ def idw_interpolate(
 
     valid = ~np.isnan(v_arr)
     if not valid.any():
-        return float("nan"), int(valid.sum())
+        return float("nan"), len(weights)
 
-    return float(np.sum(v_arr[valid] * w_arr[valid]) / np.sum(w_arr[valid])), int(valid.sum())
+    return float(np.sum(v_arr[valid] * w_arr[valid]) / np.sum(w_arr[valid])), len(weights)

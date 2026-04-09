@@ -125,7 +125,7 @@ class TestIdwInterpolate:
         val, count = idw_interpolate(target_lat, target_lon, grid_lats, grid_lons, grid_values, radius_km=50.0)
         # Should be the mean of the remaining 3 valid points
         assert val == pytest.approx(np.mean([20.0, 30.0, 40.0]))
-        assert count == 3  # Only 3 valid (non-NaN) points were used
+        assert count == 4  # All 4 points are within radius; count reflects spatial coverage
 
     def test_all_nans_returns_nan(self, simple_grid):
         """Test that if all points in radius are NaN, returns NaN."""
@@ -136,4 +136,4 @@ class TestIdwInterpolate:
 
         val, count = idw_interpolate(target_lat, target_lon, grid_lats, grid_lons, grid_values, radius_km=50.0)
         assert math.isnan(val)
-        assert count == 0  # No valid points used
+        assert count == 4  # 4 points within radius; count reflects spatial coverage not valid-NaN status

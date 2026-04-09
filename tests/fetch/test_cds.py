@@ -402,7 +402,7 @@ class TestFetchAndUploadCdsData:
         """Update mode calls retrieve_and_upload_era5_land with the latest CDS year/month."""
         mock_last_date.return_value = (datetime(2026, 3, 12), "")
         mock_retrieve.return_value = PipelineResult(
-            urls_requested=1, downloaded=1, indexed=1, uploaded=1, failed=0, file_paths=[]
+            urls_requested=1, downloaded=1, indexed=1, uploaded=1, failed=0, processed_files=[]
         )
 
         success, n_files, ts = fetch_and_upload_cds_data(
@@ -461,7 +461,7 @@ class TestFetchAndUploadCdsData:
         """Any failed file marks the run as not fully successful."""
         mock_last_date.return_value = (datetime(2026, 3, 12), "")
         mock_retrieve.return_value = PipelineResult(
-            urls_requested=2, downloaded=1, indexed=1, uploaded=1, failed=1, file_paths=[]
+            urls_requested=2, downloaded=1, indexed=1, uploaded=1, failed=1, processed_files=[]
         )
 
         success, n_files, _ = fetch_and_upload_cds_data(

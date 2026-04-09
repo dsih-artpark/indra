@@ -62,7 +62,9 @@ class PipelineResult(NamedTuple):
     :ivar int uploaded: Files uploaded to S3.  Always ``0`` when
         ``no_upload=True``.
     :ivar int failed: Files that failed at any pipeline stage.
-    :ivar list[str] file_paths: Local paths of successfully processed files.
+    :ivar list[str] processed_files: Filenames (not full paths) of files that
+        completed the pipeline.  Note: after a successful S3 upload these files
+        are deleted locally — do not treat this list as live filesystem paths.
     """
 
     urls_requested: int
@@ -70,7 +72,7 @@ class PipelineResult(NamedTuple):
     indexed: int
     uploaded: int
     failed: int
-    file_paths: list[str]
+    processed_files: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -499,22 +501,25 @@ def retrieve_and_upload_era5_land(
 
         # Collect results as workers finish
         downloaded = indexed = uploaded = failed = 0
-        file_paths: list[str] = []
+        processed_files: list[str] = []
 
         for future in as_completed(futures):
             fname = futures[future]
             try:
                 _, success, stage = future.result()
-                if success:
+                # Track counters at actual stage completion, not only on full success
+                if stage not in ("download",):          # download succeeded
                     downloaded += 1
+                if stage not in ("download", "index"):  # indexing succeeded
                     indexed += 1
-                    if stage == "uploaded":
-                        uploaded += 1
-                    file_paths.append(os.path.join(output_dir, fname))
-                    logger.info("✅ %s (stage=%s)", fname, stage)
-                else:
+                if stage == "uploaded":                  # S3 upload succeeded
+                    uploaded += 1
+                if not success:
                     failed += 1
                     logger.error("❌ %s failed at stage '%s'", fname, stage)
+                else:
+                    processed_files.append(fname)
+                    logger.info("✅ %s (stage=%s)", fname, stage)
             except Exception:
                 failed += 1
                 logger.exception("Pipeline worker raised an exception for %s", fname)
@@ -525,7 +530,7 @@ def retrieve_and_upload_era5_land(
         indexed=indexed,
         uploaded=uploaded,
         failed=failed,
-        file_paths=file_paths,
+        processed_files=processed_files,
     )
 
 
@@ -627,6 +632,11 @@ def fetch_and_upload_cds_data(
     dataset = cds_params.get("cds_dataset_name", DEFAULT_DATASET)
     # New config key; max_workers is ignored by the streaming pipeline
     pipeline_workers: int = int(cds_params.get("pipeline_workers", 3))
+    if pipeline_workers < 1:
+        logger.warning(
+            "pipeline_workers=%d is invalid; clamping to 1", pipeline_workers
+        )
+        pipeline_workers = 1
 
     s3_bucket = shared_params["s3_bucket"]
     s3_prefix = f"{cds_params['ds_id']}-{cds_params['ds_name']}/{cds_params['folder_name']}"
