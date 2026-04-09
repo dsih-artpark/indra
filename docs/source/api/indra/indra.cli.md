@@ -68,7 +68,7 @@
 ```
 ````
 
-````{py:function} callback()
+````{py:function} callback(ctx: typer.Context)
 :canonical: indra.cli.callback
 
 ```{autodoc2-docstring} indra.cli.callback

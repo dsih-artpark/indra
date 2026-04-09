@@ -13,8 +13,10 @@
 :titlesonly:
 :maxdepth: 3
 
+indra.analysis
 indra.io
 indra.fetch
+indra.process
 ```
 
 ## Submodules

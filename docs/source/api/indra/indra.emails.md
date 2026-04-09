@@ -56,10 +56,20 @@
 
 Bases: {py:obj}`enum.Enum`
 
+````{py:attribute} NOTE
+:canonical: indra.emails.Status.NOTE
+:value: >
+   (0, 'Note', 'green')
+
+```{autodoc2-docstring} indra.emails.Status.NOTE
+```
+
+````
+
 ````{py:attribute} SUCCESS
 :canonical: indra.emails.Status.SUCCESS
 :value: >
-   1
+   (1, 'Success', 'green')
 
 ```{autodoc2-docstring} indra.emails.Status.SUCCESS
 ```
@@ -69,9 +79,19 @@ Bases: {py:obj}`enum.Enum`
 ````{py:attribute} CRITICAL
 :canonical: indra.emails.Status.CRITICAL
 :value: >
-   2
+   (2, 'Critical', 'red')
 
 ```{autodoc2-docstring} indra.emails.Status.CRITICAL
+```
+
+````
+
+````{py:attribute} WARNING
+:canonical: indra.emails.Status.WARNING
+:value: >
+   (3, 'Warning', 'orange')
+
+```{autodoc2-docstring} indra.emails.Status.WARNING
 ```
 
 ````
@@ -79,7 +99,7 @@ Bases: {py:obj}`enum.Enum`
 ````{py:attribute} ERROR
 :canonical: indra.emails.Status.ERROR
 :value: >
-   3
+   (4, 'Error', 'darkred')
 
 ```{autodoc2-docstring} indra.emails.Status.ERROR
 ```
@@ -157,7 +177,7 @@ Bases: {py:obj}`enum.Enum`
 
 ````
 
-````{py:method} send_email()
+````{py:method} send_email(raise_on_error: bool = False) -> bool
 :canonical: indra.emails.Report.send_email
 
 ```{autodoc2-docstring} indra.emails.Report.send_email
@@ -169,6 +189,14 @@ Bases: {py:obj}`enum.Enum`
 :canonical: indra.emails.Report.any_criticals
 
 ```{autodoc2-docstring} indra.emails.Report.any_criticals
+```
+
+````
+
+````{py:method} any_errors()
+:canonical: indra.emails.Report.any_errors
+
+```{autodoc2-docstring} indra.emails.Report.any_errors
 ```
 
 ````
