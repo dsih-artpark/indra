@@ -134,13 +134,14 @@ def active_break_monsoon(
         )
         da = da.compute()
 
-    # Convert to daily if sub-daily
-    if da.sizes["time"] > 0:
-        time_diff = np.diff(da["time"].values[:2])
-        if len(time_diff) > 0:
-            hours = time_diff[0] / np.timedelta64(1, "h")
-            if hours < 24:
-                logger.info("Resampling sub-daily data to daily sums")
+    # Convert to daily if sub-daily (use median of up to 10 diffs for robustness)
+    if da.sizes["time"] > 1:
+        n_samples = min(10, da.sizes["time"])
+        diffs = np.diff(da["time"].values[:n_samples])
+        if len(diffs) > 0:
+            median_hours = np.median(diffs) / np.timedelta64(1, "h")
+            if median_hours < 24:
+                logger.info("Resampling sub-daily data (median interval %.1fh) to daily sums", median_hours)
                 da = da.resample(time="1D").sum()
 
     # Work with spatial dimensions if present
@@ -148,8 +149,8 @@ def active_break_monsoon(
     spatial_dims = [d for d in da.dims if d != "time"]
 
     if spatial_dims:
-        # Stack spatial dims for vectorized processing
-        da_stacked = da.stack(space=spatial_dims)
+        # Stack spatial dims; transpose to guarantee (time, space) axis order
+        da_stacked = da.stack(space=spatial_dims).transpose("time", "space")
         n_points = da_stacked.sizes["space"]
 
         active_data = np.zeros_like(da_stacked.values, dtype=float)

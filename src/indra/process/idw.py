@@ -72,6 +72,6 @@ def idw_interpolate(
 
     valid = ~np.isnan(v_arr)
     if not valid.any():
-        return float("nan"), len(weights)
+        return float("nan"), int(valid.sum())
 
-    return float(np.sum(v_arr[valid] * w_arr[valid]) / np.sum(w_arr[valid])), len(weights)
+    return float(np.sum(v_arr[valid] * w_arr[valid]) / np.sum(w_arr[valid])), int(valid.sum())

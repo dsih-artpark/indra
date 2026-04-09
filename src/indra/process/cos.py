@@ -160,6 +160,13 @@ def cos_command(
     regions_cfg = config.get("regions", {}).get(region, {})
     id_field = regions_cfg.get("id_field", "id")
     name_field = regions_cfg.get("name_field", "regionName")
+    missing = [f for f in (id_field, name_field) if f not in gdf.columns]
+    if missing:
+        raise ValueError(
+            f"Region '{region}': column(s) {missing} not found in GeoDataFrame. "
+            f"Available columns: {list(gdf.columns)}. "
+            f"Check 'id_field'/'name_field' in the regions config."
+        )
     zone_ids = gdf[id_field].tolist()
     zone_names = gdf[name_field].tolist()
 

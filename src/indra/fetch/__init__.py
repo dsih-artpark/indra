@@ -1,5 +1,11 @@
 from indra.fetch.cds import app as cds_app
-from indra.fetch.cds import check_cds_credentials, fetch_and_upload_cds_data, last_date_of_cds_data, retrieve_era5_land
+from indra.fetch.cds import (
+    PipelineResult,
+    check_cds_credentials,
+    fetch_and_upload_cds_data,
+    last_date_of_cds_data,
+    retrieve_and_upload_era5_land,
+)
 from indra.fetch.ecpds import app as ecpds_app
 from indra.fetch.ecpds import construct_ecpds_urls, last_date_of_ecpds_data
 from indra.fetch.imd import app as imd_app
@@ -13,6 +19,7 @@ from indra.fetch.imd_grid import download_data_for_dates, download_gridded_data
 from indra.fetch.imd_river_basin_qpf import app as imd_river_basin_qpf_app
 
 __all__ = [
+    "PipelineResult",
     "cds_app",
     "check_cds_credentials",
     "clean_imd_data",
@@ -30,5 +37,5 @@ __all__ = [
     "imd_river_basin_qpf_app",
     "last_date_of_cds_data",
     "last_date_of_ecpds_data",
-    "retrieve_era5_land",
+    "retrieve_and_upload_era5_land",
 ]

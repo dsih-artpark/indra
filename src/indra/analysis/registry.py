@@ -134,7 +134,7 @@ def _parse_metric(name: str, raw: dict) -> MetricDefinition:
 
     return MetricDefinition(
         name=name,
-        description=raw.get("description", ""),
+        description=raw.get("description") or "",
         variables=variables,
         base_aggregation=base_aggregation,
         condition=raw.get("condition"),

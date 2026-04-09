@@ -338,6 +338,7 @@ def compute_centroids(gdf: gpd.GeoDataFrame) -> list[tuple[float, float]]:
     # Estimate UTM zone from the centroid of all geometries
     total_centroid = gdf_valid.geometry.unary_union.centroid
     utm_zone = int((total_centroid.x + 180) / 6) + 1
+    utm_zone = max(1, min(utm_zone, 60))  # clamp: longitude==180 would produce 61
     hemisphere = "north" if total_centroid.y >= 0 else "south"
     utm_crs = f"+proj=utm +zone={utm_zone} +{hemisphere} +datum=WGS84"
 

@@ -350,6 +350,16 @@ def _write_region_csv(
                         "time": str(pd.Timestamp(da["time"].values[ti])),
                         "value": float(da.isel(time=ti).values.item()),
                     })
+            elif "region" in da.dims:
+                region_ids = da["region"].values
+                for ri in range(da.sizes["region"]):
+                    all_rows.append({
+                        "metric": metric_name,
+                        "variable": var_name,
+                        "time": None,
+                        "region_id": region_ids[ri],
+                        "value": float(da.isel(region=ri).values.item()),
+                    })
 
     df = pd.DataFrame(all_rows)
     df.to_csv(output, index=False)

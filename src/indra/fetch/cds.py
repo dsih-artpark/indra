@@ -1,10 +1,13 @@
 """Fetch ERA5-Land data from the Copernicus Climate Data Store.
 
-Downloads monthly NetCDF files for all-India using aria2c for fast parallel
-HTTP transfers, generates Kerchunk JSON sidecar indexes for each file,
-and uploads both the .nc and .json to S3.
+Downloads monthly NetCDF files for all-India using a streaming pipeline:
+for each (variable, month) pair, a CDS URL is obtained sequentially (the API
+is rate-limited to one request at a time), then the download → Kerchunk index
+→ S3 upload steps begin immediately in a thread-pool worker — overlapping with
+the next URL request.
 
 Supports two operating modes:
+
 - **update** (``--current-month``): re-downloads the current incomplete month
   and overwrites the NC + JSON on S3.
 - **backfill** (``--backfill``): downloads a range of historical year-months.
@@ -13,20 +16,23 @@ Supports two operating modes:
 import io
 import logging
 import os
-import shutil
-import subprocess
+import threading
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Annotated, Optional, Union
+from typing import Annotated, NamedTuple, Optional, Union
 
+import boto3
 import cdsapi
+import requests
 import typer
+from requests.adapters import HTTPAdapter
 from requests.exceptions import HTTPError
+from urllib3.util.retry import Retry
 
 from indra.emails import Report, Status
-from indra.io import get_params, upload_data_to_s3
+from indra.io import get_params
 from indra.io.kerchunk_index import generate_kerchunk_index
 
 logger = logging.getLogger(__name__)
@@ -35,14 +41,40 @@ logging.captureWarnings(True)
 app = typer.Typer()
 
 # ---------------------------------------------------------------------------
-# All-India bounding box (N, W, S, E) with ~50 km buffer
+# Constants
 # ---------------------------------------------------------------------------
 DEFAULT_AREA = [37.5, 67.5, 5.5, 98.5]
 DEFAULT_DATASET = "reanalysis-era5-land"
 
+# Thread-local storage: one requests.Session and one boto3 S3 client per worker
+_thread_local = threading.local()
+
 
 # ---------------------------------------------------------------------------
-# Helper: CDS latest-date probe
+# Pipeline result
+# ---------------------------------------------------------------------------
+class PipelineResult(NamedTuple):
+    """Summary of a ``retrieve_and_upload_era5_land`` run.
+
+    :ivar int urls_requested: Total CDS URL requests attempted.
+    :ivar int downloaded: Files successfully downloaded to disk.
+    :ivar int indexed: Files for which a Kerchunk JSON index was generated.
+    :ivar int uploaded: Files uploaded to S3.  Always ``0`` when
+        ``no_upload=True``.
+    :ivar int failed: Files that failed at any pipeline stage.
+    :ivar list[str] file_paths: Local paths of successfully processed files.
+    """
+
+    urls_requested: int
+    downloaded: int
+    indexed: int
+    uploaded: int
+    failed: int
+    file_paths: list[str]
+
+
+# ---------------------------------------------------------------------------
+# CDS latest-date probe
 # ---------------------------------------------------------------------------
 def last_date_of_cds_data(suppress_output=True):
     """Return the most recent date for which ERA5 data is available on CDS.
@@ -65,7 +97,6 @@ def last_date_of_cds_data(suppress_output=True):
         client = cdsapi.Client()
         std_op = ""
 
-
     current_date = datetime.now()
     request = {
         "product_type": "reanalysis",
@@ -80,7 +111,6 @@ def last_date_of_cds_data(suppress_output=True):
     with TemporaryDirectory() as output_dir:
         try:
             client.retrieve(DEFAULT_DATASET, request, output_dir)
-            # Success: the requested date is available — use it as the latest timestamp.
             latest_timestamp = datetime(
                 int(request["year"][0]),
                 int(request["month"][0]),
@@ -112,7 +142,7 @@ def last_date_of_cds_data(suppress_output=True):
 
 
 # ---------------------------------------------------------------------------
-# Helper: CDS credential check
+# CDS credential check
 # ---------------------------------------------------------------------------
 def check_cds_credentials(raiseError: bool = True, suppress_output: bool = True, get_latest_date: bool = False):
     """Check for the existence of the ``.cdsapirc`` credentials file.
@@ -143,7 +173,7 @@ def check_cds_credentials(raiseError: bool = True, suppress_output: bool = True,
 
 
 # ---------------------------------------------------------------------------
-# aria2c download helpers
+# CDS URL extraction
 # ---------------------------------------------------------------------------
 def _extract_download_url(client, dataset: str, request: dict) -> str | None:
     """Submit a CDS retrieval and return only the download URL (no download).
@@ -165,80 +195,239 @@ def _extract_download_url(client, dataset: str, request: dict) -> str | None:
         return None
 
 
-def _download_via_aria2c(url_file: str, output_dir: str, max_connections: int = 16) -> None:
-    """Launch aria2c to download all URLs listed in *url_file*.
+# ---------------------------------------------------------------------------
+# Thread-local client factories
+# ---------------------------------------------------------------------------
+def _make_download_session(max_retries: int = 3) -> requests.Session:
+    """Create a ``requests.Session`` with retry/backoff configured for file downloads.
 
-    :param str url_file:
-        Path to a text file with aria2c-format entries (URL + dir= + out=).
-    :param str output_dir:
-        Directory that aria2c should save files into.
-    :param int max_connections:
-        Max parallel connections.  Default ``16``.
+    Retries on HTTP 429 (CDS throttling), 500, 502, 503, 504 and connection
+    resets, with exponential backoff.  Only GET requests are retried.
     """
-    cmd = [
-        "aria2c",
-        "--input-file", url_file,
-        "--dir", output_dir,
-        "--max-concurrent-downloads", str(max_connections),
-        "--max-connection-per-server", str(max_connections),
-        "--split", str(max_connections),
-        "--min-split-size", "1M",
-        "--continue=true",
-        "--auto-file-renaming=false",
-        "--allow-overwrite=true",
-        "--console-log-level=warn",
-    ]
-    logger.info("Launching aria2c: %s", " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        logger.error("aria2c failed (rc=%d): %s", proc.returncode, proc.stderr)
-        raise RuntimeError(f"aria2c exited with code {proc.returncode}: {proc.stderr}")
-    logger.info("aria2c downloads complete")
+    retry = Retry(
+        total=max_retries,
+        backoff_factor=2,
+        status_forcelist={429, 500, 502, 503, 504},
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def _get_thread_session(max_retries: int = 3) -> requests.Session:
+    """Return a per-thread :class:`requests.Session`, creating one if needed."""
+    if not hasattr(_thread_local, "session"):
+        _thread_local.session = _make_download_session(max_retries)
+    return _thread_local.session
+
+
+def _get_thread_s3_client():
+    """Return a per-thread ``boto3`` S3 client, creating one if needed."""
+    if not hasattr(_thread_local, "s3_client"):
+        _thread_local.s3_client = boto3.client("s3")
+    return _thread_local.s3_client
 
 
 # ---------------------------------------------------------------------------
-# Core retrieval function
+# Streaming download helper
 # ---------------------------------------------------------------------------
-def retrieve_era5_land(
+def _download_file(
+    url: str,
+    filepath: str,
+    *,
+    timeout: tuple[int, int] = (30, 300),
+    session: requests.Session | None = None,
+) -> bool:
+    """Stream-download *url* to *filepath* using an atomic ``.part`` write.
+
+    - Any leftover ``{filepath}.part`` from a prior crash is removed first.
+    - Validates ``Content-Length`` when the header is present.
+    - Uses ``os.replace()`` for an atomic rename on success.
+    - Cleans up ``.part`` on any failure.
+
+    :returns: ``True`` on success, ``False`` on any failure (error logged).
+    """
+    part_path = filepath + ".part"
+    _session = session or _make_download_session()
+
+    # Remove leftover .part from a prior crashed run
+    if os.path.exists(part_path):
+        logger.debug("Removing leftover .part file: %s", part_path)
+        try:
+            os.remove(part_path)
+        except OSError:
+            logger.warning("Could not remove leftover .part file: %s", part_path)
+
+    try:
+        with _session.get(url, stream=True, timeout=timeout) as resp:
+            resp.raise_for_status()
+            expected_size: int | None = None
+            if "Content-Length" in resp.headers:
+                expected_size = int(resp.headers["Content-Length"])
+
+            bytes_written = 0
+            with open(part_path, "wb") as fh:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        fh.write(chunk)
+                        bytes_written += len(chunk)
+
+        if expected_size is not None and bytes_written != expected_size:
+            raise ValueError(
+                f"Content-Length mismatch for {os.path.basename(filepath)}: "
+                f"expected {expected_size} bytes, got {bytes_written}"
+            )
+
+        os.replace(part_path, filepath)
+        logger.info(
+            "Downloaded %s (%d bytes)",
+            os.path.basename(filepath), bytes_written,
+        )
+        return True
+
+    except Exception:
+        logger.exception("Download failed: %s → %s", url, os.path.basename(filepath))
+        if os.path.exists(part_path):
+            try:
+                os.remove(part_path)
+            except OSError:
+                logger.warning("Could not clean up .part file: %s", part_path)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Per-file pipeline worker
+# ---------------------------------------------------------------------------
+def _process_single_file(
+    url: str,
+    filename: str,
+    output_dir: str,
+    kerchunk_dir: str,
+    s3_bucket: str,
+    s3_prefix: str,
+    no_upload: bool,
+    timeout: tuple[int, int],
+    max_retries: int,
+) -> tuple[str, bool, str]:
+    """Run the full pipeline for one file: download → index → upload.
+
+    Upload ordering is guaranteed: ``.nc`` is uploaded before ``.json`` so
+    consumers never encounter a Kerchunk index pointing to a non-existent
+    S3 object.
+
+    When ``no_upload=True``, ``target_url`` is set to ``None`` so the
+    generated Kerchunk JSON embeds the *local* ``.nc`` path and is
+    immediately usable without S3.
+
+    :returns:
+        ``(filename, success, stage)`` where *stage* is the last completed
+        stage (``"local"``, ``"uploaded"``) or the name of the failing stage
+        (``"download"``, ``"index"``, ``"upload_nc"``, ``"upload_json"``).
+    """
+    nc_path = os.path.join(output_dir, filename)
+    basename = os.path.splitext(filename)[0]
+    json_path = os.path.join(kerchunk_dir, basename + ".json")
+
+    # ── Download ──────────────────────────────────────────────────────────
+    session = _get_thread_session(max_retries)
+    if not _download_file(url, nc_path, timeout=timeout, session=session):
+        return filename, False, "download"
+
+    # ── Kerchunk index ────────────────────────────────────────────────────
+    # When uploading: embed the S3 URL so remote readers can locate the data.
+    # When local-only: leave target_url=None so the index points to the local
+    # .nc path and is immediately usable without any S3 access.
+    target_url = f"s3://{s3_bucket}/{s3_prefix}/{filename}" if not no_upload else None
+    try:
+        generate_kerchunk_index(nc_path, json_path, target_url=target_url)
+    except Exception:
+        logger.exception("Kerchunk indexing failed: %s", filename)
+        return filename, False, "index"
+
+    if no_upload:
+        logger.info("--no-upload: kept locally — %s", filename)
+        return filename, True, "local"
+
+    # ── Upload: .nc first, then .json ─────────────────────────────────────
+    s3_client = _get_thread_s3_client()
+    nc_key = f"{s3_prefix}/{filename}"
+    json_key = f"{s3_prefix}/kerchunk_indices/{basename}.json"
+
+    try:
+        s3_client.upload_file(nc_path, s3_bucket, nc_key)
+        os.remove(nc_path)
+        logger.info("Uploaded .nc  → s3://%s/%s", s3_bucket, nc_key)
+    except Exception:
+        logger.exception("Upload failed for .nc: %s", nc_key)
+        return filename, False, "upload_nc"
+
+    try:
+        s3_client.upload_file(json_path, s3_bucket, json_key)
+        os.remove(json_path)
+        logger.info("Uploaded .json → s3://%s/%s", s3_bucket, json_key)
+    except Exception:
+        logger.exception("Upload failed for .json: %s", json_key)
+        return filename, False, "upload_json"
+
+    return filename, True, "uploaded"
+
+
+# ---------------------------------------------------------------------------
+# Streaming pipeline
+# ---------------------------------------------------------------------------
+def retrieve_and_upload_era5_land(
     *,
     year: int,
     months: list[int],
     variables: dict[str, str],
     output_dir: str,
+    kerchunk_dir: str,
+    s3_bucket: str,
+    s3_prefix: str,
     area: list[float] | None = None,
     dataset: str = DEFAULT_DATASET,
-    max_connections: int = 16,
+    pipeline_workers: int = 3,
+    no_upload: bool = False,
     check_credentials: bool = True,
-) -> list[str]:
-    """Download monthly ERA5-Land NetCDF files via aria2c.
+    download_timeout: tuple[int, int] = (30, 300),
+    download_max_retries: int = 3,
+) -> PipelineResult:
+    """Download ERA5-Land files, generate Kerchunk indexes, and upload to S3.
 
-    For each ``(variable, month)`` combination, a CDS request is made to
-    obtain the download URL.  All URLs are collected in parallel using a
-    thread pool, then batched into a single aria2c invocation for fast
-    parallel downloads.
+    URL fetching is sequential (CDS rate-limits to one active request per
+    API key).  As each URL becomes available, its download + index + upload
+    is submitted to a :class:`~concurrent.futures.ThreadPoolExecutor` so it
+    runs concurrently with the next URL request.
 
-    :param int year:
-        Year to download.
-    :param list[int] months:
-        Month numbers to download (1-indexed).
+    :param int year: Year to download.
+    :param list[int] months: Month numbers to download (1-indexed).
     :param dict[str, str] variables:
         Mapping of CDS variable names to short codes, e.g.
         ``{"2m_temperature": "2t"}``.
-    :param str output_dir:
-        Local directory for downloaded ``.nc`` files.
-    :param list[float] | None area:
-        Bounding box ``[N, W, S, E]``.  Defaults to all-India.
-    :param str dataset:
-        CDS dataset identifier.
-    :param int max_connections:
-        aria2c parallel connections.  Default ``16``.
-    :param bool check_credentials:
-        Verify CDS credentials before starting.  Default ``True``.
-    :returns:
-        List of downloaded ``.nc`` file paths.
+    :param str output_dir: Local staging directory for downloaded ``.nc`` files.
+    :param str kerchunk_dir:
+        Directory for ``.json`` Kerchunk indexes
+        (should be ``{output_dir}/kerchunk_indices``).
+    :param str s3_bucket: Destination S3 bucket.
+    :param str s3_prefix: S3 key prefix for ``.nc`` files.
+    :param list[float] | None area: Bounding box [N, W, S, E].
+    :param str dataset: CDS dataset identifier.
+    :param int pipeline_workers:
+        Thread-pool size for concurrent download+index+upload.  Default ``3``.
+    :param bool no_upload:
+        Skip S3 upload; keep files locally.  ``PipelineResult.uploaded``
+        will be ``0``.
+    :param bool check_credentials: Verify CDS credentials before starting.
+    :param tuple[int, int] download_timeout:
+        ``(connect_timeout_s, read_timeout_s)``.  Default ``(30, 300)``.
+    :param int download_max_retries: Retry attempts per download.  Default ``3``.
+    :returns: :class:`PipelineResult`.
     """
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
     if area is None:
         area = DEFAULT_AREA
@@ -247,18 +436,14 @@ def retrieve_era5_land(
         check_cds_credentials(get_latest_date=False)
 
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(kerchunk_dir, exist_ok=True)
 
-    url_file = os.path.join(output_dir, "_aria2c_urls.txt")
-    # Truncate any leftover URL file from a prior interrupted run
-    open(url_file, "w").close()
-
-    # Build the list of tasks
+    # Build tasks: one per (variable, month)
     tasks = []
     for var_full, var_code in variables.items():
         for month in months:
             month_str = f"{month:02d}"
             filename = f"era5_land_{var_code}_{year}_{month_str}.nc"
-            filepath = os.path.join(output_dir, filename)
             request = {
                 "product_type": "reanalysis",
                 "variable": var_full,
@@ -270,64 +455,82 @@ def retrieve_era5_land(
                 "time": [f"{h:02d}:00" for h in range(24)],
                 "area": area,
             }
-            tasks.append((var_code, month_str, filename, filepath, request))
+            tasks.append((var_code, month_str, filename, request))
 
-    # Thread-local CDS clients + lock for shared file writes
-    _file_lock = threading.Lock()
-    _thread_local = threading.local()
-    expected_files: list[str] = []
-    _expected_lock = threading.Lock()
+    urls_requested = 0
+    futures: dict[Future, str] = {}
 
-    def _fetch_url(task):
-        var_code, month_str, filename, filepath, request = task
-        # Each thread gets its own CDS client (requests.Session is not thread-safe)
-        if not hasattr(_thread_local, "client"):
-            _suppress_out = io.StringIO()
-            _suppress_err = io.StringIO()
-            with redirect_stdout(_suppress_out), redirect_stderr(_suppress_err):
-                _thread_local.client = cdsapi.Client()
+    # Single CDS client in the main thread (sequential URL fetching)
+    _suppress_out = io.StringIO()
+    _suppress_err = io.StringIO()
+    with redirect_stdout(_suppress_out), redirect_stderr(_suppress_err):
+        cds_client = cdsapi.Client()
 
-        logger.info("Requesting CDS URL for %s %s-%s ...", var_code, year, month_str)
-        url = _extract_download_url(_thread_local.client, dataset, request)
-        if url is None:
-            logger.warning("Skipping %s %s-%s — no URL obtained", var_code, year, month_str)
-            return
+    logger.info(
+        "Pipeline: year=%d, months=%s, vars=%d, workers=%d, no_upload=%s",
+        year, months, len(variables), pipeline_workers, no_upload,
+    )
 
-        try:
-            with _file_lock:
-                with open(url_file, "a") as fp:
-                    fp.write(url + "\n")
-                    fp.write(f"  dir={output_dir}\n")
-                    fp.write(f"  out={filename}\n")
-            with _expected_lock:
-                expected_files.append(filepath)
-        except OSError:
-            logger.exception(
-                "Failed to write URL entry for %s %s-%s (url_file=%s)",
-                var_code, year, month_str, url_file,
+    with ThreadPoolExecutor(
+        max_workers=pipeline_workers, thread_name_prefix="cds_pipeline"
+    ) as executor:
+        # Sequential URL requests; submit pipeline work as each URL arrives
+        for var_code, month_str, filename, request in tasks:
+            logger.info("Requesting CDS URL: %s %s-%s …", var_code, year, month_str)
+            url = _extract_download_url(cds_client, dataset, request)
+            urls_requested += 1
+
+            if url is None:
+                logger.warning(
+                    "No URL obtained for %s %s-%s — skipping", var_code, year, month_str
+                )
+                continue
+
+            logger.info(
+                "URL obtained for %s %s-%s — queuing pipeline worker", var_code, year, month_str
             )
+            future = executor.submit(
+                _process_single_file,
+                url, filename, output_dir, kerchunk_dir,
+                s3_bucket, s3_prefix, no_upload,
+                download_timeout, download_max_retries,
+            )
+            futures[future] = filename
 
-    with ThreadPoolExecutor(max_workers=max_connections) as executor:
-        list(executor.map(_fetch_url, tasks))
+        # Collect results as workers finish
+        downloaded = indexed = uploaded = failed = 0
+        file_paths: list[str] = []
 
-    if not expected_files:
-        logger.warning("No download URLs were obtained — nothing to download")
-        return []
+        for future in as_completed(futures):
+            fname = futures[future]
+            try:
+                _, success, stage = future.result()
+                if success:
+                    downloaded += 1
+                    indexed += 1
+                    if stage == "uploaded":
+                        uploaded += 1
+                    file_paths.append(os.path.join(output_dir, fname))
+                    logger.info("✅ %s (stage=%s)", fname, stage)
+                else:
+                    failed += 1
+                    logger.error("❌ %s failed at stage '%s'", fname, stage)
+            except Exception:
+                failed += 1
+                logger.exception("Pipeline worker raised an exception for %s", fname)
 
-    _download_via_aria2c(url_file, output_dir, max_connections=max_connections)
-
-    # Clean up the URL file
-    if os.path.exists(url_file):
-        os.remove(url_file)
-
-    # Return only files that actually exist on disk
-    downloaded = [f for f in expected_files if os.path.exists(f)]
-    logger.info("Downloaded %d/%d files", len(downloaded), len(expected_files))
-    return downloaded
+    return PipelineResult(
+        urls_requested=urls_requested,
+        downloaded=downloaded,
+        indexed=indexed,
+        uploaded=uploaded,
+        failed=failed,
+        file_paths=file_paths,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Fetch + index + upload pipeline
+# Fetch + index + upload orchestrator
 # ---------------------------------------------------------------------------
 def fetch_and_upload_cds_data(
     yaml_path: Path,
@@ -341,23 +544,19 @@ def fetch_and_upload_cds_data(
 ) -> tuple[bool, int, datetime]:
     """Download ERA5-Land data, generate Kerchunk indexes, upload to S3.
 
-    :param Path yaml_path:
-        Path to the YAML configuration file.
-    :param str log_level:
-        Logging level.  Default ``"DEBUG"``.
-    :param bool current_month:
-        If ``True``, download the current month to-date.
-    :param str | None backfill_start:
-        Start date ``YYYY-MM`` for backfill mode.
-    :param str | None backfill_end:
-        End date ``YYYY-MM`` for backfill mode.
+    :param Path yaml_path: Path to the YAML configuration file.
+    :param str log_level: Logging level.  Default ``"DEBUG"``.
+    :param bool current_month: If ``True``, download the current month to-date.
+    :param str | None backfill_start: Start date ``YYYY-MM`` for backfill mode.
+    :param str | None backfill_end: End date ``YYYY-MM`` for backfill mode.
     :param bool no_upload:
-        If ``True``, skip S3 upload and keep files locally.  Default ``False``.
+        If ``True``, skip S3 upload and keep files locally.
+        ``PipelineResult.uploaded`` will be ``0`` and the email report will
+        state that files were saved locally rather than uploaded to S3.
     :param str | None output_dir:
-        Directory to save downloaded files when skipping upload.  Only used
-        when ``no_upload=True``.  Defaults to ``./output/cds_downloads``.
-    :returns:
-        ``(upload_success, total_files, latest_timestamp)``
+        Directory to save downloaded files when ``no_upload=True``.
+        Defaults to ``./output/cds_downloads``.
+    :returns: ``(all_success, total_downloaded, latest_timestamp)``
     """
     params = get_params(yaml_path=yaml_path)
     cds_params = params["cds"]
@@ -365,11 +564,10 @@ def fetch_and_upload_cds_data(
 
     latest_timestamp, _ = last_date_of_cds_data()
 
-    # ── Determine which (year, months) to download ────────────────────────
+    # ── Determine which (year, months) to download ─────────────────────────
     year_months: list[tuple[int, list[int]]] = []
 
     if backfill_start and backfill_end:
-        # Backfill mode: iterate year-months in range
         try:
             start = datetime.strptime(backfill_start, "%Y-%m")
             end = datetime.strptime(backfill_end, "%Y-%m")
@@ -380,7 +578,6 @@ def fetch_and_upload_cds_data(
         current = start
         while current <= end:
             yr = current.year
-            # Collect all months for this year in range
             months_for_year = []
             while current.year == yr and current <= end:
                 months_for_year.append(current.month)
@@ -390,10 +587,8 @@ def fetch_and_upload_cds_data(
                     current = current.replace(month=current.month + 1)
             year_months.append((yr, months_for_year))
     elif current_month:
-        # Update mode: just the current month
         year_months = [(latest_timestamp.year, [latest_timestamp.month])]
     else:
-        # Custom dates from YAML
         raw_start = cds_params.get("start_date", "")
         raw_end = cds_params.get("end_date", "")
         if not raw_start or str(raw_start).lower() in ("none", "null", ""):
@@ -425,24 +620,22 @@ def fetch_and_upload_cds_data(
                     current = current.replace(month=current.month + 1)
             year_months.append((yr, months_for_year))
 
-    # ── Resolve config ────────────────────────────────────────────────────
+    # ── Resolve config ──────────────────────────────────────────────────────
     variables: dict[str, str] = cds_params["variables"]
     area = cds_params.get("bounds_nwse", {})
-    # Use the first (and only) bounding box entry
     area_values = list(area.values())[0] if area else DEFAULT_AREA
     dataset = cds_params.get("cds_dataset_name", DEFAULT_DATASET)
-    max_workers = cds_params.get("max_workers", 12)
+    # New config key; max_workers is ignored by the streaming pipeline
+    pipeline_workers: int = int(cds_params.get("pipeline_workers", 3))
 
     s3_bucket = shared_params["s3_bucket"]
     s3_prefix = f"{cds_params['ds_id']}-{cds_params['ds_name']}/{cds_params['folder_name']}"
 
-    total_files = 0
+    total_downloaded = 0
     all_success = True
 
-    # ── Download → Index → Upload ─────────────────────────────────────────
+    # ── Per-year pipeline loop ──────────────────────────────────────────────
     for year, months in year_months:
-        # If skipping upload, keep files in a persistent directory; otherwise
-        # use a TemporaryDirectory that auto-cleans after upload.
         if no_upload:
             local_dir = output_dir or os.path.join("output", "cds_downloads")
             os.makedirs(local_dir, exist_ok=True)
@@ -452,76 +645,44 @@ def fetch_and_upload_cds_data(
             local_dir = ctx_manager.__enter__()
 
         try:
+            kerchunk_dir = os.path.join(local_dir, "kerchunk_indices")
             logger.info("Processing year=%d months=%s → %s", year, months, local_dir)
 
-            nc_files = retrieve_era5_land(
+            result = retrieve_and_upload_era5_land(
                 year=year,
                 months=months,
                 variables=variables,
                 output_dir=local_dir,
+                kerchunk_dir=kerchunk_dir,
+                s3_bucket=s3_bucket,
+                s3_prefix=s3_prefix,
                 area=area_values,
                 dataset=dataset,
-                max_connections=max_workers,
+                pipeline_workers=pipeline_workers,
+                no_upload=no_upload,
                 check_credentials=False,
+                download_timeout=(30, 300),
+                download_max_retries=3,
             )
 
-            if not nc_files:
-                logger.warning("No files downloaded for year=%d months=%s", year, months)
-                continue
-
-            total_files += len(nc_files)
-
-            # ── Generate Kerchunk indexes locally ─────────────────────────
-            kerchunk_dir = os.path.join(local_dir, "kerchunk_indices")
-            os.makedirs(kerchunk_dir, exist_ok=True)
-            for nc_file in nc_files:
-                nc_basename = os.path.splitext(os.path.basename(nc_file))[0]
-                nc_filename = os.path.basename(nc_file)
-                json_path = os.path.join(kerchunk_dir, f"{nc_basename}.json")
-                # Embed the S3 URL in the index so remote readers can find the data.
-                # Without this, the local temp path gets baked in and the index
-                # becomes unusable for Kerchunk-based S3 streaming.
-                s3_target_url = f"s3://{s3_bucket}/{s3_prefix}/{nc_filename}"
-                try:
-                    generate_kerchunk_index(nc_file, json_path, target_url=s3_target_url)
-                except Exception:
-                    logger.exception(
-                        "Failed to generate Kerchunk index for %s — skipping",
-                        nc_file,
-                    )
-
-            if no_upload:
-                logger.info(
-                    "--no-upload set: skipping S3 upload. Files saved to: %s", local_dir
+            total_downloaded += result.downloaded
+            if result.failed > 0:
+                all_success = False
+                logger.warning(
+                    "Year %d: %d/%d files failed",
+                    year, result.failed, result.urls_requested,
                 )
-            else:
-                # Upload .nc files
-                nc_upload_failures = upload_data_to_s3(
-                    upload_dir=local_dir,
-                    Bucket=s3_bucket,
-                    Prefix=s3_prefix,
-                    extension="nc",
-                )
-                if nc_upload_failures > 0:
-                    all_success = False
 
-                # Upload Kerchunk JSON indexes
-                json_upload_failures = upload_data_to_s3(
-                    upload_dir=kerchunk_dir,
-                    Bucket=s3_bucket,
-                    Prefix=f"{s3_prefix}/kerchunk_indices",
-                    extension="json",
-                )
-                if json_upload_failures > 0:
-                    all_success = False
         finally:
             if ctx_manager is not None:
                 ctx_manager.__exit__(None, None, None)
 
-    return all_success, total_files, latest_timestamp
+    return all_success, total_downloaded, latest_timestamp
 
 
+# ---------------------------------------------------------------------------
 # CLI entry point
+# ---------------------------------------------------------------------------
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
@@ -594,7 +755,8 @@ def main(
 ) -> None:
     """Fetch ERA5-Land data from CDS and upload to S3.
 
-    Downloads monthly NetCDF files via aria2c, generates Kerchunk JSON
+    Downloads monthly NetCDF files via a streaming pipeline (URL fetch →
+    download → Kerchunk index → S3 upload), generates Kerchunk JSON sidecar
     indexes, and uploads both to S3.  Supports update mode (current month)
     and backfill mode (historical date range).
     """
@@ -637,25 +799,42 @@ def main(
         current_date = datetime.now().strftime("%Y-%m-%d")
         current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        if upload_success:
-            message = (
-                f"All {no_files} files obtained from {dataset_name} "
-                f"on {dataset_source} have been successfully uploaded to S3 on {current_date}.\n"
-                f"The last timestamp of data availability for {dataset_name} is {latest_timestamp} UTC, "
-                f"when checked at approximately {current_timestamp} UTC. "
-                f"Detailed health of the run can be found in the debug log file for the "
-                f"current month on the server: logs/{parent_config.get('log_file')}"
-            )
-            report.add_a_status_report("CDS Upload", Status.SUCCESS, message)
+        if no_upload:
+            # Local-only run — do not claim S3 upload in the report
+            dest = output_dir or "output/cds_downloads"
+            if upload_success:
+                message = (
+                    f"All {no_files} files from {dataset_name} ({dataset_source}) "
+                    f"were saved locally to '{dest}' on {current_date} (--no-upload mode)."
+                )
+                report.add_a_status_report("CDS Download (local)", Status.SUCCESS, message)
+            else:
+                message = (
+                    f"One or more files from {dataset_name} ({dataset_source}) "
+                    f"failed to download on {current_date} (--no-upload mode).\n"
+                    f"Detailed health of the run can be found in the attached debug log file."
+                )
+                report.add_a_status_report("CDS Download (local)", Status.CRITICAL, message)
         else:
-            message = (
-                f"One or more files from {dataset_name} "
-                f"on {dataset_source} have failed to upload to S3 on {current_date}.\n"
-                f"The last timestamp of data availability for {dataset_name} is {latest_timestamp} UTC, "
-                f"when checked at approximately {current_timestamp} UTC.\n"
-                f"Detailed health of the run can be found in the attached debug log file."
-            )
-            report.add_a_status_report("CDS Upload", Status.CRITICAL, message)
+            if upload_success:
+                message = (
+                    f"All {no_files} files obtained from {dataset_name} "
+                    f"on {dataset_source} have been successfully uploaded to S3 on {current_date}.\n"
+                    f"The last timestamp of data availability for {dataset_name} is {latest_timestamp} UTC, "
+                    f"when checked at approximately {current_timestamp} UTC. "
+                    f"Detailed health of the run can be found in the debug log file for the "
+                    f"current month on the server: logs/{parent_config.get('log_file')}"
+                )
+                report.add_a_status_report("CDS Upload", Status.SUCCESS, message)
+            else:
+                message = (
+                    f"One or more files from {dataset_name} "
+                    f"on {dataset_source} have failed to upload to S3 on {current_date}.\n"
+                    f"The last timestamp of data availability for {dataset_name} is {latest_timestamp} UTC, "
+                    f"when checked at approximately {current_timestamp} UTC.\n"
+                    f"Detailed health of the run can be found in the attached debug log file."
+                )
+                report.add_a_status_report("CDS Upload", Status.CRITICAL, message)
 
     except Exception as e:
         logger.exception("CDS fetch failed: %s", e)
@@ -678,10 +857,11 @@ if __name__ == "__main__":
     app()
 
 __all__ = [
+    "PipelineResult",
     "app",
     "check_cds_credentials",
     "fetch_and_upload_cds_data",
     "last_date_of_cds_data",
     "main",
-    "retrieve_era5_land",
+    "retrieve_and_upload_era5_land",
 ]

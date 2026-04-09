@@ -88,3 +88,42 @@ def upload_data_to_s3(*,
     else:
         logger.info(f"Successfully uploaded all {total_uploads} files with ext {extension} Bucket: {Bucket} Prefix: {Prefix}")
         return failed_uploads
+
+
+def upload_single_file_to_s3(
+    local_path: str,
+    bucket: str,
+    key: str,
+    *,
+    delete_after: bool = True,
+) -> bool:
+    """Upload a single local file to S3 and optionally delete it.
+
+    :param str local_path:
+        Absolute path to the file to upload.
+    :param str bucket:
+        S3 bucket name.
+    :param str key:
+        S3 object key (full path within the bucket).
+    :param bool delete_after:
+        If ``True`` (default), delete the local file after a successful upload.
+    :returns:
+        ``True`` on success, ``False`` on failure (error already logged).
+    """
+    client = boto3.client("s3")
+    try:
+        client.upload_file(Filename=local_path, Bucket=bucket, Key=key)
+        logger.info("Uploaded %s → s3://%s/%s", os.path.basename(local_path), bucket, key)
+    except Exception as exc:
+        logger.error("Failed to upload %s to s3://%s/%s: %s", local_path, bucket, key, exc)
+        return False
+
+    if delete_after:
+        try:
+            os.remove(local_path)
+            logger.debug("Deleted local file: %s", local_path)
+        except OSError as exc:
+            logger.warning(
+                "Upload succeeded but could not delete local file %s: %s", local_path, exc
+            )
+    return True

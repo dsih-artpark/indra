@@ -199,7 +199,7 @@ def _compute_simple_metric(
         result_da = next(iter(var_arrays.values()))
 
     # Step 3: Reduce (temporal aggregation)
-    reduce_cfg = metric.reduce
+    reduce_cfg = metric.reduce if isinstance(metric.reduce, dict) else {}
     reduce_freq = reduce_cfg.get("frequency", "monthly")
     reduce_method = reduce_cfg.get("method", "count")
 
@@ -208,11 +208,10 @@ def _compute_simple_metric(
     )
 
     if reduce_method == "fraction":
-        # Fraction = count_true / total_count
-        total_da = xr.ones_like(result_da)
-        result_da = _resample(result_da, reduce_freq, "sum") / _resample(
-            total_da, reduce_freq, "sum"
-        )
+        # Fraction = count_true / total_count; guard against zero denominator
+        numerator = _resample(result_da, reduce_freq, "sum")
+        denom = _resample(xr.ones_like(result_da), reduce_freq, "sum")
+        result_da = xr.where(denom == 0, np.nan, numerator / denom)
     elif reduce_method == "count":
         # Count: sum of boolean (1.0/0.0) values
         result_da = _resample(result_da, reduce_freq, "sum")
@@ -270,7 +269,7 @@ def _compute_plugin_metric(
         )
 
     # Apply reduce if the plugin returned raw per-timestep data
-    reduce_cfg = metric.reduce
+    reduce_cfg = metric.reduce if isinstance(metric.reduce, dict) else {}
     reduce_freq = reduce_cfg.get("frequency", "monthly")
     reduce_method = reduce_cfg.get("method", "count")
 
@@ -282,9 +281,9 @@ def _compute_plugin_metric(
                 result_agg[var_name] = _resample(da, reduce_freq, "sum")
             elif reduce_method == "fraction":
                 total = xr.ones_like(da)
-                result_agg[var_name] = _resample(da, reduce_freq, "sum") / _resample(
-                    total, reduce_freq, "sum"
-                )
+                numerator = _resample(da, reduce_freq, "sum")
+                denom = _resample(total, reduce_freq, "sum")
+                result_agg[var_name] = xr.where(denom == 0, np.nan, numerator / denom)
             else:
                 result_agg[var_name] = _resample(da, reduce_freq, reduce_method)
         result = xr.Dataset(result_agg)
