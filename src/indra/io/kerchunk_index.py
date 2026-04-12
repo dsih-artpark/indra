@@ -133,6 +133,9 @@ def open_virtual_dataset(
         ref_opts["remote_options"] = _remote_opts
 
     mapper = fsspec.get_mapper("reference://", **ref_opts)
-    ds = xr.open_dataset(mapper, engine="zarr", consolidated=False)
+    # chunks={} makes xarray wrap every variable in a Dask array so that all
+    # subsequent transforms (deaccumulation, clipping, etc.) stay lazy until
+    # the final .load() call, enabling parallel chunked S3 fetches.
+    ds = xr.open_dataset(mapper, engine="zarr", consolidated=False, chunks={})
     logger.debug("Opened virtual dataset from %s — dims=%s", json_ref, dict(ds.sizes))
     return ds

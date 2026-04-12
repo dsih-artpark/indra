@@ -18,7 +18,6 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 import geopandas as gpd
-import numpy as np
 import pandas as pd
 import typer
 import xarray as xr
@@ -29,24 +28,27 @@ from indra.io.s3_read import download_from_s3
 
 logger = logging.getLogger(__name__)
 
-# ── Unit conversion helpers ────────────────────────────────────────────────────
+# ── Variable metadata ────────────────────────────────────────────────────────────
 
-# Maps ERA5 short names to human-readable units and conversion functions.
-# Temperature vars are in Kelvin → Celsius; precipitation in metres → mm.
+# Maps ERA5 short names to metadata.
+# No unit conversions are applied — all values remain in their native ERA5 units
+# (e.g. temperature in Kelvin, precipitation in metres).
+# The only exception is deaccumulation (flagged below), which is a data correction
+# rather than a unit change.
 VARIABLE_META = {
-    "t2m": {"long_name": "2m Temperature", "unit": "°C", "convert": lambda x: x - 273.15},
-    "2t":  {"long_name": "2m Temperature", "unit": "°C", "convert": lambda x: x - 273.15},
-    "d2m": {"long_name": "2m Dewpoint Temperature", "unit": "°C", "convert": lambda x: x - 273.15},
-    "2d":  {"long_name": "2m Dewpoint Temperature", "unit": "°C", "convert": lambda x: x - 273.15},
-    "tp":  {"long_name": "Total Precipitation", "unit": "mm", "convert": lambda x: x * 1000,
+    "t2m": {"long_name": "2m Temperature", "unit": "K"},
+    "2t":  {"long_name": "2m Temperature", "unit": "K"},
+    "d2m": {"long_name": "2m Dewpoint Temperature", "unit": "K"},
+    "2d":  {"long_name": "2m Dewpoint Temperature", "unit": "K"},
+    "tp":  {"long_name": "Total Precipitation", "unit": "m",
              "deaccumulate": True},  # ERA5 tp is cumulative per forecast cycle (resets 00Z/12Z)
-    "10u": {"long_name": "10m U Wind Component", "unit": "m/s", "convert": lambda x: x},
-    "u10": {"long_name": "10m U Wind Component", "unit": "m/s", "convert": lambda x: x},
-    "10v": {"long_name": "10m V Wind Component", "unit": "m/s", "convert": lambda x: x},
-    "v10": {"long_name": "10m V Wind Component", "unit": "m/s", "convert": lambda x: x},
-    # IMD variables (no conversion needed)
-    "rh":   {"long_name": "Relative Humidity", "unit": "%", "convert": lambda x: x},
-    "rain": {"long_name": "Rainfall", "unit": "mm", "convert": lambda x: x},
+    "10u": {"long_name": "10m U Wind Component", "unit": "m/s"},
+    "u10": {"long_name": "10m U Wind Component", "unit": "m/s"},
+    "10v": {"long_name": "10m V Wind Component", "unit": "m/s"},
+    "v10": {"long_name": "10m V Wind Component", "unit": "m/s"},
+    # IMD variables
+    "rh":   {"long_name": "Relative Humidity", "unit": "%"},
+    "rain": {"long_name": "Rainfall", "unit": "mm"},
 }
 
 # Maps CF names → GRIB short names for normalization.
@@ -572,6 +574,11 @@ def _deaccumulate_vars(ds: xr.Dataset) -> xr.Dataset:
 
     Only variables that have ``"deaccumulate": True`` in ``VARIABLE_META``
     are processed; all others are returned unchanged.
+
+    Implementation note: all operations use xarray/Dask primitives (``diff``,
+    ``where``, ``clip``, ``concat``) so the dataset remains fully lazy.  No
+    ``.values`` call is made here; materialization is deferred to the single
+    ``.load()`` at the end of ``load_dataset``.
     """
     vars_to_deaccum = [
         var for var in ds.data_vars
@@ -589,67 +596,47 @@ def _deaccumulate_vars(ds: xr.Dataset) -> xr.Dataset:
 
     new_vars = {}
     for var in vars_to_deaccum:
-        da = ds[var]
-        vals = da.values  # shape: (time, ...) or (time, lat, lon)
+        da = ds[var]  # still lazy (Dask-backed)
 
-        # Compute forward differences along the time axis
-        diffs = np.diff(vals, axis=0)  # shape: (time-1, ...)
+        # Lazy forward difference along the time axis: shape (time-1, ...)
+        diffs = da.diff(dim="time")
 
-        # Detect cycle resets: where the value drops (diff < 0).
-        # Use a small negative threshold to tolerate float noise.
-        is_reset = diffs < -1e-9  # True at each reset point
+        # Values at t=1..N (the "post" values at each step)
+        raw_post = da.isel(time=slice(1, None))
 
-        # At reset points the raw post-reset value IS the hourly
-        # increment (first accumulation step of the new cycle).
-        # At non-reset points the diff is the hourly increment.
-        # Build the result array for timesteps 1..N.
-        raw_post = vals[1:]  # raw values at t=1..N
-        hourly = np.where(is_reset, raw_post, diffs)
+        # Detect cycle resets: diff < 0 means a new forecast cycle started.
+        # At resets the raw post-value is already the first increment of the
+        # new cycle; everywhere else the diff is the correct increment.
+        is_reset = diffs < -1e-9
+        hourly = xr.where(is_reset, raw_post, diffs)
 
-        # Safety: clip any residual negatives from float noise
-        hourly = np.maximum(hourly, 0)
+        # Clip any residual negatives from floating-point noise
+        hourly = hourly.clip(min=0)
 
-        # Handle first timestep: if the next value drops below it,
-        # this timestep is the tail of a previous cycle (e.g. 00:00
-        # holds the 24h accumulated total from yesterday).  Zero it
-        # out since we cannot properly de-accumulate without the
-        # prior cycle's data.  Otherwise keep it as the first
-        # increment of a new cycle.
-        first_is_cycle_tail = np.any(diffs[0] < -1e-9)
-        if first_is_cycle_tail:
-            first_val = np.zeros_like(vals[0])
-        else:
-            first_val = vals[0]
-
-        result = np.concatenate(
-            [first_val[np.newaxis, ...], hourly], axis=0
+        # Handle the very first timestep.
+        # If the difference from step 0 → step 1 is negative, step 0 is the
+        # tail of a prior forecast cycle (it holds the full cycle accumulation)
+        # and cannot be de-accumulated without the preceding data — zero it.
+        # Otherwise, keep the raw first value as the first increment.
+        first_step = da.isel(time=0)
+        first_diff = diffs.isel(time=0)  # diff[0] = da[1] - da[0]
+        # Element-wise tail detection (per grid cell), not a global scalar.
+        first_is_tail = first_diff < -1e-9
+        first_val = xr.where(first_is_tail, xr.zeros_like(first_step), first_step)
+        # Restore the time coordinate on the scalar slice so concat works
+        first_val = first_val.expand_dims("time").assign_coords(
+            time=da.isel(time=[0]).coords["time"]
         )
 
-        new_vars[var] = da.copy(data=result)
-        n_resets = int(np.sum(np.any(is_reset.reshape(is_reset.shape[0], -1), axis=-1)))
+        result = xr.concat([first_val, hourly], dim="time")
+        new_vars[var] = result
+
         logger.info(
-            "De-accumulated '%s': %d timesteps, %d cycle resets detected.",
-            var, da.sizes["time"], n_resets,
+            "De-accumulated '%s': %d timesteps (lazy).",
+            var, da.sizes["time"],
         )
 
     return ds.assign(new_vars)
-
-
-def _apply_conversions(ds: xr.Dataset) -> xr.Dataset:
-    """Apply unit conversions from VARIABLE_META to all matching variables.
-
-    Conversions are applied once here in the data loader so that all downstream
-    consumers (analysis engine, IDW interpolator, CoS module) receive data
-    already in the correct output units (e.g. mm instead of metres).
-    """
-    new_vars = {}
-    for var in ds.data_vars:
-        convert = VARIABLE_META.get(var, {}).get("convert")
-        if convert:
-            new_vars[var] = ds[var].copy(data=convert(ds[var].values))
-    if new_vars:
-        ds = ds.assign(new_vars)
-    return ds
 
 
 def _apply_temporal_aggregation(
@@ -795,36 +782,31 @@ def load_dataset(
         # ── Normalize ────────────────────────────────────────────────────
         ds = _normalize_dataset(ds)
 
-        # ── De-accumulate cumulative variables (e.g. ERA5 tp) ─────────────
-        ds = _deaccumulate_vars(ds)
-
-        # ── Apply unit conversions (m→mm, K→°C, etc.) ────────────────────
-        ds = _apply_conversions(ds)
-
-        # ── Slice to date range ──────────────────────────────────────────
-        ds = ds.sel(time=slice(str(dt_start), str(dt_end)))
-
-        # ── Validate date coverage ───────────────────────────────────────
-        if ds.sizes.get("time", 0) == 0:
-            raise typer.BadParameter(
-                f"No data found for requested range {dt_start} to {dt_end}."
-            )
-
-        actual_start = str(ds["time"].values.min())[:10]
-        actual_end = str(ds["time"].values.max())[:10]
-        if actual_start != str(dt_start) or actual_end != str(dt_end):
-            logger.warning(
-                "⚠️  Partial data coverage: requested %s to %s, "
-                "but data only exists for %s to %s. "
-                "Processing available data only.",
-                dt_start, dt_end, actual_start, actual_end,
-            )
-            typer.echo(
-                f"⚠️  Data only available for {actual_start} to {actual_end} "
-                f"(requested {dt_start} to {dt_end}). Processing available range."
-            )
+        # ── Time pre-slice with 1-step lookback ──────────────────────────
+        # Clip to the requested date window early so that deaccumulation and
+        # all subsequent lazy transforms only touch the data we actually need.
+        # We include one extra timestep before dt_start as a lookback buffer:
+        # _deaccumulate_vars diffs consecutive steps, so the first requested
+        # timestep needs the preceding value to compute its increment correctly.
+        # After deaccumulation we trim the buffer away (see "Final time trim").
+        pre_times = ds["time"].values  # coordinate only — tiny, always cheap
+        pre_times_pd = pd.to_datetime(pre_times)
+        lookback_mask = pre_times_pd < pd.Timestamp(str(dt_start))
+        if lookback_mask.any():
+            # Pick the latest timestep that is strictly before dt_start
+            lookback_time = pre_times[lookback_mask][-1]
+            time_start_with_lookback = str(pd.Timestamp(lookback_time))
+        else:
+            time_start_with_lookback = str(dt_start)
+        ds = ds.sel(time=slice(time_start_with_lookback, str(dt_end)))
+        logger.debug(
+            "Time pre-slice (with lookback): %s to %s",
+            time_start_with_lookback, dt_end,
+        )
 
         # ── Spatial clipping ─────────────────────────────────────────────
+        # Clip to the region's bounding box *before* deaccumulation so that
+        # subsequent lazy ops only cover the geographic area we care about.
         if gdf is not None and "latitude" in ds.dims and "longitude" in ds.dims:
             bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
             buffer_deg = spatial_buffer_km / 111.0
@@ -833,6 +815,7 @@ def load_dataset(
             lon_min = bounds[0] - buffer_deg
             lon_max = bounds[2] + buffer_deg
 
+            # Reading coordinate arrays is cheap (1-D, small)
             lats = ds["latitude"].values
             ds_lat_min, ds_lat_max = float(lats.min()), float(lats.max())
             ds_lon_min = float(ds["longitude"].values.min())
@@ -859,6 +842,34 @@ def load_dataset(
                     f"lat [{ds_lat_min:.2f}, {ds_lat_max:.2f}], "
                     f"lon [{ds_lon_min:.2f}, {ds_lon_max:.2f}]"
                 )
+
+        # ── De-accumulate cumulative variables (e.g. ERA5 tp) ─────────────
+        # Runs lazily — no .values calls inside; Dask graph only.
+        ds = _deaccumulate_vars(ds)
+
+        # ── Final time trim to exact requested range ──────────────────────
+        # Remove the 1-step lookback buffer added before deaccumulation.
+        ds = ds.sel(time=slice(str(dt_start), str(dt_end)))
+
+        # ── Validate date coverage ───────────────────────────────────────
+        if ds.sizes.get("time", 0) == 0:
+            raise typer.BadParameter(
+                f"No data found for requested range {dt_start} to {dt_end}."
+            )
+
+        actual_start = str(ds["time"].values.min())[:10]
+        actual_end = str(ds["time"].values.max())[:10]
+        if actual_start != str(dt_start) or actual_end != str(dt_end):
+            logger.warning(
+                "⚠️  Partial data coverage: requested %s to %s, "
+                "but data only exists for %s to %s. "
+                "Processing available data only.",
+                dt_start, dt_end, actual_start, actual_end,
+            )
+            typer.echo(
+                f"⚠️  Data only available for {actual_start} to {actual_end} "
+                f"(requested {dt_start} to {dt_end}). Processing available range."
+            )
 
         # ── Temporal aggregation ─────────────────────────────────────────
         ds = _apply_temporal_aggregation(ds, aggregation, variables)
