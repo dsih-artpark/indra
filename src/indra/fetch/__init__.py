@@ -6,6 +6,7 @@ from indra.fetch.cds import (
     last_date_of_cds_data,
     retrieve_and_upload_era5_land,
 )
+from indra.fetch.openmeteo import OpenMeteoError, fetch_era5_points
 from indra.fetch.ecpds import app as ecpds_app
 from indra.fetch.ecpds import construct_ecpds_urls, last_date_of_ecpds_data
 from indra.fetch.imd import app as imd_app
@@ -19,6 +20,7 @@ from indra.fetch.imd_grid import download_data_for_dates, download_gridded_data
 from indra.fetch.imd_river_basin_qpf import app as imd_river_basin_qpf_app
 
 __all__ = [
+    "OpenMeteoError",
     "PipelineResult",
     "cds_app",
     "check_cds_credentials",
@@ -28,6 +30,7 @@ __all__ = [
     "download_gridded_data",
     "ecpds_app",
     "fetch_and_upload_cds_data",
+    "fetch_era5_points",
     "imd_app",
     "imd_coastal_bulletin_app",
     "imd_cwf_latlong_app",

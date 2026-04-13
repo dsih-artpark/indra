@@ -23,6 +23,7 @@ from indra.analysis.engine import compute_metrics
 from indra.analysis.registry import load_metrics
 from indra.io import get_params
 from indra.process.data_loader import (
+    _S3_FALLBACK_ERRORS,
     compute_centroids,
     load_dataset,
     resolve_dates,
@@ -40,6 +41,13 @@ class SpatialMode(str, Enum):
     """Valid spatial modes for the analyze command."""
     grid = "grid"
     region = "region"
+
+
+class WeatherSource(str, Enum):
+    """Valid weather data sources for ERA5 variables."""
+    s3 = "s3"
+    openmeteo = "openmeteo"
+    auto = "auto"
 
 
 @_process_app.command("analyze")
@@ -89,6 +97,15 @@ def analyze_command(
     plugin_dir: Optional[str] = typer.Option(
         None, "--plugin-dir",
         help="Directory to add to sys.path for plugin discovery.",
+    ),
+    weather_source: WeatherSource = typer.Option(
+        WeatherSource.s3, "--weather-source", "-ws",
+        help=(
+            "Weather data source for ERA5 variables: "
+            "'s3' (default, S3/CDS+Kerchunk pipeline), "
+            "'openmeteo' (Open-Meteo Historical API, region mode only), or "
+            "'auto' (try S3 first, fall back to Open-Meteo on network/credential errors)."
+        ),
     ),
 ) -> None:
     """Compute weather metrics defined in a YAML file."""
@@ -145,19 +162,30 @@ def analyze_command(
     os.makedirs(os.path.dirname(output) if os.path.dirname(output) else ".", exist_ok=True)
 
     logger.info(
-        "Analyze: metrics=%d, dates=%s→%s, spatial=%s, region=%s, output=%s",
+        "Analyze: metrics=%d, dates=%s→%s, spatial=%s, region=%s, "
+        "weather_source=%s, output=%s",
         len(all_metrics), dt_start, dt_end, spatial,
-        region or "none", output,
+        region or "none", weather_source, output,
     )
 
-    # ── Load data from all sources ───────────────────────────────────────
+    # ── Load data from all sources ────────────────────────────────────────
+    # Per-source strategy:
+    # - Each source is independently loaded and (if in region mode) IDW'd
+    #   to (time, region) before merge.
+    # - ERA5 variables respect --weather-source; IMD is always S3.
+    # - This prevents mixed-dimension crashes when ERA5 comes from Open-Meteo
+    #   (already (time, region)) and IMD is still a (lat, lon) grid.
     datasets: dict[str, xr.Dataset] = {}
     gdf = None
     centroids = None
 
     for source, vars_list in source_vars.items():
         logger.info("Loading data from source '%s': variables=%s", source, vars_list)
-        ds, src_gdf, src_centroids = load_dataset(
+
+        # Only ERA5 respects the weather_source flag; IMD always uses S3
+        src_weather_source = weather_source if source == "era5" else "s3"
+
+        _load_kwargs = dict(
             config=config,
             dt_start=dt_start,
             dt_end=dt_end,
@@ -168,10 +196,22 @@ def analyze_command(
             local_shapefile=local_shapefile,
             spatial_buffer_km=radius_km,
         )
-        datasets[source] = ds
+
+        if src_weather_source == "auto":
+            try:
+                ds, src_gdf, src_centroids = load_dataset(**_load_kwargs, weather_source="s3")
+            except _S3_FALLBACK_ERRORS as exc:
+                logger.warning(
+                    "S3 access failed for source '%s' (%s: %s) — falling back to Open-Meteo",
+                    source, type(exc).__name__, exc,
+                )
+                ds, src_gdf, src_centroids = load_dataset(**_load_kwargs, weather_source="openmeteo")
+        else:
+            ds, src_gdf, src_centroids = load_dataset(**_load_kwargs, weather_source=src_weather_source)
+
+        # Capture the first valid gdf/centroids across sources
         if src_gdf is not None:
             if gdf is not None:
-                # Check for geometry consistency across sources
                 try:
                     if not gdf.geometry.equals(src_gdf.geometry):
                         logger.warning(
@@ -179,16 +219,46 @@ def analyze_command(
                             "Keeping the first geometry (gdf=%d rows, src_gdf=%d rows).",
                             source, len(gdf), len(src_gdf),
                         )
-                except Exception:
+                except (ValueError, TypeError, AttributeError) as exc:
                     logger.warning(
-                        "Could not compare geometries across sources. "
-                        "Keeping first geometry."
+                        "Could not compare geometries for source '%s' — "
+                        "keeping first geometry. Error: %s",
+                        source, exc,
+                        exc_info=True,
                     )
             else:
                 gdf = src_gdf
                 centroids = src_centroids
 
+        # ── Per-source IDW (region mode) ──────────────────────────────
+        # IDW only if the dataset still has grid (lat/lon) dims.
+        # Open-Meteo data already has (time, region); skip IDW for it.
+        if use_region and gdf is not None and centroids is not None:
+            if "latitude" in ds.dims and "longitude" in ds.dims:
+                logger.info(
+                    "IDW-interpolating source '%s' (%d vars) to %d region centroids",
+                    source, len(vars_list), len(centroids),
+                )
+                ds = _idw_interpolate_dataset(
+                    ds, gdf, centroids, vars_list,
+                    radius_km=radius_km, idw_power=idw_power,
+                )
+            elif "region" in ds.dims:
+                logger.info(
+                    "Source '%s' already has 'region' dim (Open-Meteo) — skipping IDW",
+                    source,
+                )
+            else:
+                logger.warning(
+                    "Source '%s' has neither lat/lon nor region dims; "
+                    "skipping IDW for this source.", source,
+                )
+
+        datasets[source] = ds
+
     # ── Merge datasets from different sources ────────────────────────────
+    # All sources have already been IDW'd to (time, region) if in region mode
+    # above — a simple merge is safe here regardless of weather_source.
     if len(datasets) == 1:
         merged_ds = next(iter(datasets.values()))
     else:
@@ -206,13 +276,8 @@ def analyze_command(
             len(datasets), len(merged_ds.data_vars), merged_ds.sizes.get("time", 0),
         )
 
-    # ── Region mode: IDW interpolation before metric computation ─────────
-    if use_region and gdf is not None and centroids is not None:
-        logger.info("Performing IDW interpolation to %d region centroids", len(centroids))
-        merged_ds = _idw_interpolate_dataset(
-            merged_ds, gdf, centroids, list(all_variables),
-            radius_km=radius_km, idw_power=idw_power,
-        )
+    # ── Region mode: IDW is now done per-source above ─────────────────────
+    # The old post-merge IDW block is removed; see per-source IDW loop above.
 
     # ── Compute metrics ──────────────────────────────────────────────────
     results = compute_metrics(

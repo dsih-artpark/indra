@@ -26,6 +26,17 @@ from indra.io import get_params
 from indra.io.kerchunk_index import open_virtual_dataset
 from indra.io.s3_read import download_from_s3
 
+# Errors that indicate S3 / network / credential problems.
+# Only these trigger Open-Meteo fallback in "auto" mode;
+# validation / programming errors are always re-raised.
+_S3_FALLBACK_ERRORS = (
+    FileNotFoundError,   # S3 key not found
+    PermissionError,     # AWS credentials missing/invalid
+    ConnectionError,     # network failure
+    TimeoutError,        # S3 timeout
+    OSError,             # broad I/O failures
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Variable metadata ────────────────────────────────────────────────────────────
@@ -359,6 +370,19 @@ def compute_centroids(gdf: gpd.GeoDataFrame) -> list[tuple[float, float]]:
 # ── Variable source resolution ────────────────────────────────────────────────
 
 
+#: Bidirectional alias map: CF names ↔ GRIB short names.
+#: Used to ensure metrics that reference ``t2m`` resolve even when the config
+#: only lists ``2t`` (and vice‑versa).
+_VAR_ALIASES: dict[str, str] = {
+    "t2m": "2t",
+    "d2m": "2d",
+    "u10": "10u",
+    "v10": "10v",
+}
+# Build the reverse (canonical → alias) direction automatically
+_VAR_ALIASES.update({v: k for k, v in list(_VAR_ALIASES.items())})
+
+
 def resolve_variable_sources(
     config: dict,
     variables: list[str],
@@ -367,6 +391,9 @@ def resolve_variable_sources(
 
     Scans ``cds.variables``, ``imd.variables``, etc. and returns a dict
     like ``{"tp": "era5", "rh": "imd"}``.
+
+    Aliases are resolved bidirectionally so that metrics referencing ``t2m``
+    find the ERA5 source even when the config only lists ``2t``, and vice‑versa.
 
     :raises ValueError: If a variable cannot be found in any source config.
     """
@@ -377,11 +404,18 @@ def resolve_variable_sources(
     cds_vars = config.get("cds", {}).get("variables", {})
     for _long, short in cds_vars.items():
         source_lookup[short] = "era5"
+        # Register alias if it exists and is not already registered
+        alias = _VAR_ALIASES.get(short)
+        if alias and alias not in source_lookup:
+            source_lookup[alias] = "era5"
 
     # IMD variables
     imd_vars = config.get("imd", {}).get("variables", {})
     for _long, short in imd_vars.items():
         source_lookup[short] = "imd"
+        alias = _VAR_ALIASES.get(short)
+        if alias and alias not in source_lookup:
+            source_lookup[alias] = "imd"
 
     result: dict[str, str] = {}
     missing: list[str] = []
@@ -684,8 +718,9 @@ def load_dataset(
     local_shapefile: str | None = None,
     aggregation: str = "none",
     spatial_buffer_km: float = 25.0,
+    weather_source: str = "s3",
 ) -> tuple[xr.Dataset, gpd.GeoDataFrame | None, list[tuple[float, float]] | None]:
-    """Load gridded data as an xarray Dataset.
+    """Load gridded data (or region-point data) as an xarray Dataset.
 
     Handles:
     - Shapefile loading (S3 or local)
@@ -694,6 +729,7 @@ def load_dataset(
     - Time/variable normalization
     - Spatial clipping to shapefile extent + buffer
     - Temporal aggregation
+    - Open-Meteo API as an alternative primary source or S3 fallback
 
     :param config: Parsed YAML config dict.
     :param dt_start: Start date (inclusive).
@@ -705,8 +741,29 @@ def load_dataset(
     :param local_shapefile: Path to local GeoJSON/shapefile (optional).
     :param aggregation: Temporal aggregation: ``"none"``, ``"daily"``, ``"weekly"``, ``"monthly"``.
     :param spatial_buffer_km: Buffer around shapefile extent for spatial clipping.
+    :param weather_source:
+        ``"s3"`` (default) — use the existing S3/CDS/Kerchunk pipeline.
+        ``"openmeteo"`` — use Open-Meteo Historical API (region mode only).
+        ``"auto"`` — try S3 first; fall back to Open-Meteo on storage/network
+        errors (region mode only when fallback is triggered).
     :returns: ``(dataset, gdf_or_None, centroids_or_None)``.
     """
+    # ── Validate weather_source ──────────────────────────────────────────────
+    _VALID_WEATHER_SOURCES = {"s3", "openmeteo", "auto"}
+    if weather_source not in _VALID_WEATHER_SOURCES:
+        raise ValueError(
+            f"Invalid weather_source={weather_source!r}. "
+            f"Must be one of: {sorted(_VALID_WEATHER_SOURCES)}"
+        )
+
+    # ── Open-Meteo guard: grid mode not supported ────────────────────────────
+    if weather_source == "openmeteo" and source == "era5" and not region:
+        raise typer.BadParameter(
+            "Open-Meteo source requires --region. "
+            "Grid mode is not supported with Open-Meteo (it returns point data, not "
+            "gridded NetCDF). Use --weather-source s3 for grid mode."
+        )
+
     with tempfile.TemporaryDirectory(prefix="indra_dl_") as tmp_dir:
         # ── Shapefile ────────────────────────────────────────────────────
         gdf: gpd.GeoDataFrame | None = None
@@ -726,6 +783,60 @@ def load_dataset(
                 "Loaded %d regions (id_field=%s, name_field=%s)",
                 len(gdf), id_field, name_field,
             )
+
+        # ── Open-Meteo fast path (skips all S3/Kerchunk logic) ──────────
+        # Triggered when: weather_source=="openmeteo" explicitly, OR
+        # weather_source=="auto" and region is set (so we can fall back here
+        # if S3 fails).  The actual auto-fallback wraps the S3 block below.
+        def _load_from_openmeteo() -> xr.Dataset:
+            """Call Open-Meteo and return a (time, region) Dataset."""
+            from indra.fetch.openmeteo import fetch_era5_points
+
+            if gdf is None or centroids is None:
+                raise typer.BadParameter(
+                    "Open-Meteo requires --region so centroids can be derived "
+                    "from the shapefile."
+                )
+            # Extract region IDs from gdf — reuse same ID-column logic as
+            # _idw_interpolate_dataset in analysis/cli.py
+            _ID_CANDIDATES = ["id", "ID", "fid", "FID", "region_id", "REGION_ID"]
+            id_col: str | None = None
+            for candidate in _ID_CANDIDATES:
+                if candidate in gdf.columns:
+                    id_col = candidate
+                    break
+            if id_col is None:
+                for col in gdf.columns:
+                    if col == "geometry":
+                        continue
+                    if gdf[col].dropna().is_unique:
+                        id_col = col
+                        break
+            if id_col is None:
+                raise ValueError(
+                    "Cannot determine a unique ID column from the shapefile/GeoJSON "
+                    f"for Open-Meteo region lookup. Columns: {list(gdf.columns)}"
+                )
+            region_ids = gdf[id_col].astype(str).tolist()
+            logger.info(
+                "Open-Meteo: querying %d centroid(s) for vars=%s",
+                len(centroids), variables,
+            )
+            om_ds = fetch_era5_points(
+                centroids=centroids,
+                region_ids=region_ids,
+                variables=variables,
+                start_date=dt_start,
+                end_date=dt_end,
+                config=config,
+            )
+            # Apply temporal aggregation if requested
+            om_ds = _apply_temporal_aggregation(om_ds, aggregation, variables)
+            return om_ds
+
+        if weather_source == "openmeteo" and source == "era5":
+            ds = _load_from_openmeteo()
+            return ds, gdf, centroids
 
         # ── NetCDF file discovery ────────────────────────────────────────
         s3_prefix, file_pattern = resolve_nc_keys(config, source=source)
@@ -850,7 +961,10 @@ def load_dataset(
                 )
 
         # ── De-accumulate cumulative variables (e.g. ERA5 tp) ─────────────
-        # Runs lazily — no .values calls inside; Dask graph only.
+        # Open-Meteo already returns instantaneous hourly precipitation
+        # (not cumulative), so de-accumulation must be skipped for that path.
+        # The openmeteo fast-path returns early above; this block is only
+        # reached for S3-sourced data.
         ds = _deaccumulate_vars(ds)
 
         # ── Final time trim to exact requested range ──────────────────────
@@ -900,4 +1014,8 @@ def load_dataset(
         # in memory before the temp files are deleted.
         ds = ds.load()
 
+        # ── Auto fallback: if S3 succeeded we return here ────────────────
+        # (The Open-Meteo fast-path in "openmeteo" mode already returned
+        # earlier; "auto" mode wrapping happens at the call-site level in
+        # cos.py / analysis/cli.py so they can pass centroids through.)
         return ds, gdf, centroids

@@ -19,9 +19,12 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 import typer
+import xarray as xr
 
+from indra.analysis.cli import WeatherSource
 from indra.io import get_params
 from indra.process.data_loader import (
+    _S3_FALLBACK_ERRORS,
     load_dataset,
     resolve_dates,
 )
@@ -108,6 +111,15 @@ def cos_command(
         None, "--local-shapefile",
         help="Path to a local GeoJSON/shapefile. Skips S3 download for the region boundary.",
     ),
+    weather_source: WeatherSource = typer.Option(
+        WeatherSource.s3, "--weather-source", "-ws",
+        help=(
+            "Weather data source for ERA5 variables: "
+            "'s3' (default, S3/CDS+Kerchunk pipeline), "
+            "'openmeteo' (Open-Meteo Historical API, region mode only), or "
+            "'auto' (try S3 first, fall back to Open-Meteo on network/credential errors)."
+        ),
+    ),
 ) -> None:
     """Change of Support — IDW interpolation from ERA5 grids to regions."""
     # ── Resolve dates ────────────────────────────────────────────────────────
@@ -135,12 +147,16 @@ def cos_command(
     os.makedirs(os.path.dirname(output) if os.path.dirname(output) else ".", exist_ok=True)
 
     logger.info(
-        "CoS: region=%s, dates=%s→%s, vars=%s, agg=%s, radius=%.0fkm, output=%s",
-        region, dt_start, dt_end, variables, aggregation, radius_km, output,
+        "CoS: region=%s, dates=%s→%s, vars=%s, agg=%s, radius=%.0fkm, "
+        "weather_source=%s, output=%s",
+        region, dt_start, dt_end, variables, aggregation, radius_km,
+        weather_source, output,
     )
 
-    # ── Load data via shared data_loader ─────────────────────────────────────
-    ds, gdf, centroids = load_dataset(
+    # ── Load data via shared data_loader ───────────────────────────────────────
+    # In "auto" mode, try S3 first.  On S3/network/credential failures only,
+    # fall back to Open-Meteo.  Validation errors propagate unchanged.
+    _load_kwargs = dict(
         config=config,
         dt_start=dt_start,
         dt_end=dt_end,
@@ -152,6 +168,18 @@ def cos_command(
         aggregation=aggregation,
         spatial_buffer_km=radius_km,
     )
+
+    if weather_source == "auto":
+        try:
+            ds, gdf, centroids = load_dataset(**_load_kwargs, weather_source="s3")
+        except _S3_FALLBACK_ERRORS as exc:
+            logger.warning(
+                "S3 data access failed (%s: %s) — falling back to Open-Meteo",
+                type(exc).__name__, exc,
+            )
+            ds, gdf, centroids = load_dataset(**_load_kwargs, weather_source="openmeteo")
+    else:
+        ds, gdf, centroids = load_dataset(**_load_kwargs, weather_source=weather_source)
 
     if gdf is None or centroids is None:
         raise typer.BadParameter("CoS requires a --region to be specified.")
@@ -170,7 +198,7 @@ def cos_command(
     zone_ids = gdf[id_field].tolist()
     zone_names = gdf[name_field].tolist()
 
-    # ── Check available variables ────────────────────────────────────────────
+    # ── Check available variables ──────────────────────────────────────────
     available_vars = [v for v in variables if v in ds]
     if not available_vars:
         raise typer.BadParameter(
@@ -178,7 +206,26 @@ def cos_command(
             f"Available: {list(ds.data_vars)}"
         )
 
-    # ── Build lat/lon arrays ─────────────────────────────────────────────────
+    # ── Open-Meteo path: data already has region dim ───────────────────────
+    # The Open-Meteo fetcher returns (time, region); IDW is not needed.
+    if "region" in ds.dims:
+        logger.info(
+            "Dataset has 'region' dimension (Open-Meteo path) — skipping IDW"
+        )
+        _write_cos_region_csv_direct(
+            ds=ds,
+            available_vars=available_vars,
+            zone_ids=zone_ids,
+            zone_names=zone_names,
+            region_dim_values=ds["region"].values.tolist(),
+            output=output,
+        )
+        logger.info("\u2705 CoS complete (Open-Meteo) — written to %s", output)
+        typer.echo(f"Output: {output}")
+        return
+
+    # ── S3 / grid path: IDW interpolation ────────────────────────────────
+    # ── Build lat/lon arrays ───────────────────────────────────────────
     lats = ds["latitude"].values
     lons = ds["longitude"].values
     lon_grid, lat_grid = np.meshgrid(lons, lats)
@@ -228,3 +275,66 @@ def cos_command(
     df.to_csv(output, index=False)
     logger.info("✅ CoS complete — %d rows written to %s", len(df), output)
     typer.echo(f"Output: {output}  ({len(df)} rows)")
+
+
+def _write_cos_region_csv_direct(
+    ds: xr.Dataset,
+    available_vars: list[str],
+    zone_ids: list,
+    zone_names: list,
+    region_dim_values: list[str],
+    output: str,
+) -> None:
+    """Write CoS CSV from a (time, region) Open-Meteo dataset without IDW.
+
+    The ``region`` coordinate values in the dataset are the shapefile ID strings
+    placed there by :func:`indra.fetch.openmeteo.fetch_era5_points`.  We align
+    them with ``zone_ids`` / ``zone_names`` from the GDF.
+
+    :param ds: Dataset with dims ``(time, region)``.
+    :param available_vars: Variable short-names present in *ds*.
+    :param zone_ids: Ordered list of zone ID strings from the shapefile.
+    :param zone_names: Ordered list of zone name strings from the shapefile.
+    :param region_dim_values: Values of the ``region`` coordinate in *ds*
+        (region ID strings set by the Open-Meteo fetcher).
+    :param output: Output CSV path.
+    """
+    import pandas as pd
+
+    # Build zone_id → zone_name lookup
+    id_to_name: dict[str, str] = dict(zip(
+        [str(z) for z in zone_ids],
+        [str(n) for n in zone_names],
+    ))
+
+    # Warn once per missing reg_id (not per timestep) to avoid log flooding.
+    _warned_missing: set[str] = set()
+
+    rows: list[dict] = []
+    timesteps = ds["time"].values
+    for ts in timesteps:
+        for reg_id in region_dim_values:
+            zone_name = id_to_name.get(reg_id)
+            if zone_name is None and reg_id not in _warned_missing:
+                logger.warning(
+                    "Region ID '%s' from Open-Meteo dataset has no matching entry "
+                    "in the shapefile lookup (expected one of %d known IDs: %s). "
+                    "'zone_name' will be empty for this region.",
+                    reg_id,
+                    len(id_to_name),
+                    list(id_to_name.keys())[:5],  # show first 5 for brevity
+                )
+                _warned_missing.add(reg_id)
+            row: dict = {
+                "zone_id":   reg_id,
+                "zone_name": zone_name or "",
+                "timestamp": str(pd.Timestamp(ts)),
+            }
+            for var in available_vars:
+                val = float(ds[var].sel(region=reg_id, time=ts).values)
+                row[var] = round(val, 4)
+            rows.append(row)
+
+    df = pd.DataFrame(rows)
+    df.to_csv(output, index=False)
+    logger.info("✅ %d rows written to %s", len(df), output)

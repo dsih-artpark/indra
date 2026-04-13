@@ -74,3 +74,12 @@ cos:
   idw_power: 2
   search_radius_km: 25
 
+# Open-Meteo API configuration (optional).
+# Used when --weather-source openmeteo or --weather-source auto is set.
+# Supports any region profile — centroids are derived from the user's shapefile.
+openmeteo:
+  api_url: "https://archive-api.open-meteo.com/v1/archive"
+  model: "era5_seamless"   # "era5_seamless" (default, best accuracy) or "era5" (0.25° res)
+  api_key: null        # Optional — set for commercial API tier
+  max_retries: 3
+  timeout: 60          # seconds per request

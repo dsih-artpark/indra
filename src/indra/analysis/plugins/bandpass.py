@@ -149,9 +149,14 @@ def active_break_monsoon(
     # Convert to daily if sub-daily (use median of up to 10 diffs for robustness)
     if da.sizes["time"] > 1:
         n_samples = min(10, da.sizes["time"])
-        diffs = np.diff(da["time"].values[:n_samples])
-        if len(diffs) > 0:
-            median_hours = np.median(diffs) / np.timedelta64(1, "h")
+        # Use pandas DatetimeIndex.asi8 (raw int64 nanoseconds) to compute
+        # diffs safely — this works for both naive and tz-aware datetimes.
+        # np.diff on tz-aware datetime64[ns, UTC] returns dtype=object
+        # (Python datetime.timedelta), which cannot be divided by np.timedelta64.
+        time_ns = pd.DatetimeIndex(da["time"].values[:n_samples]).asi8  # int64 ns
+        diffs_ns = np.diff(time_ns)
+        if len(diffs_ns) > 0:
+            median_hours = float(np.median(diffs_ns)) / 3_600_000_000_000.0  # ns → h
             if median_hours < 24:
                 logger.info("Resampling sub-daily data (median interval %.1fh) to daily sums", median_hours)
                 da = da.resample(time="1D").sum()
