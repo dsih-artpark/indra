@@ -54,26 +54,33 @@ def idw_interpolate(
     """
     weights: list[float] = []
     values: list[float] = []
+    n_in_radius = 0
+    exact_match_value: float | None = None
 
     for i in range(len(grid_lats)):
         d = haversine(target_lat, target_lon, grid_lats[i], grid_lons[i])
         if d <= radius_km:
+            n_in_radius += 1
             if d < 1e-10:  # target coincides with a grid point
                 if not np.isnan(grid_values[i]):
-                    return float(grid_values[i]), 1
-                continue  # skip NaN coincident point
+                    exact_match_value = float(grid_values[i])
+                continue  # skip NaN coincident points; don't add to IDW weights
             w = 1.0 / (d ** power)
             weights.append(w)
             values.append(grid_values[i])
 
+    # Return exact match after counting all in-radius points
+    if exact_match_value is not None:
+        return exact_match_value, n_in_radius
+
     if not weights:
-        return float("nan"), 0
+        return float("nan"), n_in_radius
 
     w_arr = np.array(weights)
     v_arr = np.array(values)
 
     valid = ~np.isnan(v_arr)
     if not valid.any():
-        return float("nan"), len(weights)
+        return float("nan"), n_in_radius
 
-    return float(np.sum(v_arr[valid] * w_arr[valid]) / np.sum(w_arr[valid])), len(weights)
+    return float(np.sum(v_arr[valid] * w_arr[valid]) / np.sum(w_arr[valid])), n_in_radius

@@ -43,7 +43,11 @@ indra.fetch.ecpds
 ````{py:data} __all__
 :canonical: indra.fetch.__all__
 :value: >
-   ['cds_app', 'check_cds_credentials', 'clean_imd_data', 'construct_ecpds_urls', 'download_data_for_da...
+   ['PipelineResult', 'cds_app', 'check_cds_credentials', 'clean_imd_data', 'construct_ecpds_urls',
+   'download_data_for_dates', 'download_gridded_data', 'ecpds_app', 'fetch_and_upload_cds_data',
+   'imd_app', 'imd_coastal_bulletin_app', 'imd_cwf_latlong_app', 'imd_dist_warning_app',
+   'imd_district_rainfall_app', 'imd_grid_app', 'imd_river_basin_qpf_app',
+   'last_date_of_cds_data', 'last_date_of_ecpds_data', 'retrieve_and_upload_era5_land']
 
 ```{autodoc2-docstring} indra.fetch.__all__
 ```

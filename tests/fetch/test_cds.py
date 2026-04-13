@@ -230,7 +230,7 @@ class TestProcessSingleFile:
         mock_s3 = MagicMock()
         mock_s3_factory.return_value = mock_s3
 
-        fname, success, stage = _process_single_file(
+        _fname, success, stage = _process_single_file(
             "https://example.com/data.nc", filename,
             output_dir, kerchunk_dir,
             "test-bucket", "prefix", False, (30, 300), 3,
@@ -251,7 +251,7 @@ class TestProcessSingleFile:
         output_dir, kerchunk_dir = self._setup_dirs(tmp_path, filename)
         mock_s3_factory.return_value = MagicMock()
 
-        fname, success, stage = _process_single_file(
+        _fname, success, stage = _process_single_file(
             "https://example.com/data.nc", filename,
             output_dir, kerchunk_dir,
             "test-bucket", "prefix", True, (30, 300), 3,
@@ -286,7 +286,7 @@ class TestProcessSingleFile:
         mock_s3.upload_file.side_effect = track_and_fail
         mock_s3_factory.return_value = mock_s3
 
-        fname, success, stage = _process_single_file(
+        _fname, success, stage = _process_single_file(
             "https://example.com/data.nc", filename,
             output_dir, kerchunk_dir,
             "test-bucket", "prefix", False, (30, 300), 3,
@@ -339,10 +339,10 @@ class TestRetrieveAndUploadEra5Land:
     @patch("indra.fetch.cds._extract_download_url")
     @patch("indra.fetch.cds.cdsapi.Client")
     @patch("indra.fetch.cds.check_cds_credentials")
-    def test_none_url_skipped_not_counted_as_downloaded(
+    def test_none_url_counted_as_failed(
         self, mock_creds, mock_client, mock_extract, mock_process, tmp_path
     ):
-        """When _extract_download_url returns None, that file is not downloaded or failed."""
+        """When _extract_download_url returns None, that file is counted as failed."""
         mock_extract.return_value = None  # CDS can't produce a URL
 
         os.makedirs(str(tmp_path / "kerchunk_indices"), exist_ok=True)
@@ -359,7 +359,7 @@ class TestRetrieveAndUploadEra5Land:
 
         assert result.urls_requested == 1
         assert result.downloaded == 0
-        assert result.failed == 0  # not counted as failed — just skipped
+        assert result.failed == 1  # None URL is a pipeline failure
         mock_process.assert_not_called()
 
     @patch("indra.fetch.cds._process_single_file")

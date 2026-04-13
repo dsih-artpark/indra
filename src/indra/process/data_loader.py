@@ -132,7 +132,7 @@ def resolve_nc_keys(config: dict, source: str = "era5") -> tuple[str, str]:
 
     if src_cfg.get("s3_prefix"):
         base_prefix = src_cfg["s3_prefix"]
-    else:
+    elif source == "era5":
         cds = config.get("cds", {})
         ds_id = cds.get("ds_id")
         ds_name = cds.get("ds_name")
@@ -144,6 +144,12 @@ def resolve_nc_keys(config: dict, source: str = "era5") -> tuple[str, str]:
                 "to locate NetCDF files on S3."
             )
         base_prefix = f"{ds_id}-{ds_name}/{folder_name}"
+    else:
+        raise typer.BadParameter(
+            f"Config section '{source}' must define 's3_prefix' "
+            f"to locate NetCDF files on S3. "
+            f"Add '{source}.s3_prefix' to your config."
+        )
 
     return base_prefix, file_pattern
 
@@ -660,7 +666,7 @@ def _apply_temporal_aggregation(
     ds_agg = {}
     for var in variables:
         if var in ds:
-            if var in ("tp",):
+            if var in ("tp", "rain"):
                 ds_agg[var] = ds[var].resample(time=freq).sum()
             else:
                 ds_agg[var] = ds[var].resample(time=freq).mean()

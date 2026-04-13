@@ -107,6 +107,12 @@ def analyze_command(
                 f"Metric '{metric_name}' not found in {metrics_path}."
             )
 
+    if not all_metrics:
+        raise typer.BadParameter(
+            f"No metrics found in {metrics_path}. "
+            "Ensure the file defines at least one metric under 'metrics:'."
+        )
+
     # ── Collect all required variables ───────────────────────────────────
     all_variables: set[str] = set()
     for m in all_metrics:
@@ -372,7 +378,13 @@ def _write_grid_output(
 ) -> None:
     """Write grid-level metric results to NetCDF or CSV."""
     if output.endswith(".nc"):
-        merged = xr.merge(list(results.values()))
+        # Prefix each variable with its metric name to avoid collisions
+        # when two metrics define a variable with the same name.
+        renamed: list[xr.Dataset] = []
+        for metric_key, result_ds in results.items():
+            rename_map = {v: f"{metric_key}__{v}" for v in result_ds.data_vars}
+            renamed.append(result_ds.rename(rename_map))
+        merged = xr.merge(renamed)
         merged.to_netcdf(output)
         logger.info("✅ Wrote NetCDF to %s", output)
     else:

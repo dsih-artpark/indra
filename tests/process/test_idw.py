@@ -69,7 +69,7 @@ class TestIdwInterpolate:
 
         val, count = idw_interpolate(target_lat, target_lon, grid_lats, grid_lons, grid_values, radius_km=50.0)
         assert val == grid_values[0]
-        assert count == 1
+        assert count == 4  # All 4 points are within 50km radius; count reflects spatial coverage
 
     def test_center_interpolation(self, simple_grid):
         """Test that target exactly in the middle gets equal weighting."""

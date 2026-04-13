@@ -122,6 +122,18 @@ def active_break_monsoon(
     if season_months is None:
         season_months = [6, 7, 8, 9]
 
+    if not season_months:
+        raise ValueError(
+            "season_months must be a non-empty list of month integers (1–12). "
+            f"Got: {season_months!r}"
+        )
+    invalid_months = [m for m in season_months if not isinstance(m, int) or m < 1 or m > 12]
+    if invalid_months:
+        raise ValueError(
+            f"season_months contains invalid values: {invalid_months}. "
+            "All entries must be integers in the range 1–12."
+        )
+
     # Ensure we have a time dimension
     if "time" not in da.dims:
         raise ValueError("DataArray must have a 'time' dimension.")

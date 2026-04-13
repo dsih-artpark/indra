@@ -460,6 +460,7 @@ def retrieve_and_upload_era5_land(
             tasks.append((var_code, month_str, filename, request))
 
     urls_requested = 0
+    failed = 0
     futures: dict[Future, str] = {}
 
     # Single CDS client in the main thread (sequential URL fetching)
@@ -483,9 +484,11 @@ def retrieve_and_upload_era5_land(
             urls_requested += 1
 
             if url is None:
-                logger.warning(
-                    "No URL obtained for %s %s-%s — skipping", var_code, year, month_str
+                logger.error(
+                    "No URL obtained for %s %s-%s — counting as failed",
+                    var_code, year, month_str,
                 )
+                failed += 1
                 continue
 
             logger.info(
@@ -500,7 +503,7 @@ def retrieve_and_upload_era5_land(
             futures[future] = filename
 
         # Collect results as workers finish
-        downloaded = indexed = uploaded = failed = 0
+        downloaded = indexed = uploaded = 0
         processed_files: list[str] = []
 
         for future in as_completed(futures):

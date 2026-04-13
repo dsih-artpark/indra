@@ -27,12 +27,8 @@
   - ```{autodoc2-docstring} indra.fetch.cds._extract_download_url
     :summary:
     ```
-* - {py:obj}`_download_via_aria2c <indra.fetch.cds._download_via_aria2c>`
-  - ```{autodoc2-docstring} indra.fetch.cds._download_via_aria2c
-    :summary:
-    ```
-* - {py:obj}`retrieve_era5_land <indra.fetch.cds.retrieve_era5_land>`
-  - ```{autodoc2-docstring} indra.fetch.cds.retrieve_era5_land
+* - {py:obj}`retrieve_and_upload_era5_land <indra.fetch.cds.retrieve_and_upload_era5_land>`
+  - ```{autodoc2-docstring} indra.fetch.cds.retrieve_and_upload_era5_land
     :summary:
     ```
 * - {py:obj}`fetch_and_upload_cds_data <indra.fetch.cds.fetch_and_upload_cds_data>`
@@ -136,17 +132,10 @@
 ```
 ````
 
-````{py:function} _download_via_aria2c(url_file: str, output_dir: str, max_connections: int = 16) -> None
-:canonical: indra.fetch.cds._download_via_aria2c
+````{py:function} retrieve_and_upload_era5_land(*, year: int, months: list[int], variables: dict[str, str], output_dir: str, kerchunk_dir: str, s3_bucket: str, s3_prefix: str, area: list[float] | None = None, dataset: str = DEFAULT_DATASET, pipeline_workers: int = 3, no_upload: bool = False, check_credentials: bool = True, download_timeout: tuple[int, int] = (30, 300), download_max_retries: int = 3) -> PipelineResult
+:canonical: indra.fetch.cds.retrieve_and_upload_era5_land
 
-```{autodoc2-docstring} indra.fetch.cds._download_via_aria2c
-```
-````
-
-````{py:function} retrieve_era5_land(*, year: int, months: list[int], variables: dict[str, str], output_dir: str, area: list[float] | None = None, dataset: str = DEFAULT_DATASET, max_connections: int = 16, check_credentials: bool = True) -> list[str]
-:canonical: indra.fetch.cds.retrieve_era5_land
-
-```{autodoc2-docstring} indra.fetch.cds.retrieve_era5_land
+```{autodoc2-docstring} indra.fetch.cds.retrieve_and_upload_era5_land
 ```
 ````
 

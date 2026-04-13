@@ -273,20 +273,22 @@ def _compute_plugin_metric(
     reduce_freq = reduce_cfg.get("frequency", "monthly")
     reduce_method = reduce_cfg.get("method", "count")
 
-    if "time" in result.dims:
-        result_agg = {}
-        for var_name in result.data_vars:
-            da = result[var_name]
-            if reduce_method == "count":
-                result_agg[var_name] = _resample(da, reduce_freq, "sum")
-            elif reduce_method == "fraction":
-                total = xr.ones_like(da)
-                numerator = _resample(da, reduce_freq, "sum")
-                denom = _resample(total, reduce_freq, "sum")
-                result_agg[var_name] = xr.where(denom == 0, np.nan, numerator / denom)
-            else:
-                result_agg[var_name] = _resample(da, reduce_freq, reduce_method)
-        result = xr.Dataset(result_agg)
+    result_agg = {}
+    for var_name in result.data_vars:
+        da = result[var_name]
+        if "time" not in da.dims:
+            # Non-temporal variable — pass through unchanged
+            result_agg[var_name] = da
+        elif reduce_method == "count":
+            result_agg[var_name] = _resample(da, reduce_freq, "sum")
+        elif reduce_method == "fraction":
+            total = xr.ones_like(da)
+            numerator = _resample(da, reduce_freq, "sum")
+            denom = _resample(total, reduce_freq, "sum")
+            result_agg[var_name] = xr.where(denom == 0, np.nan, numerator / denom)
+        else:
+            result_agg[var_name] = _resample(da, reduce_freq, reduce_method)
+    result = xr.Dataset(result_agg)
 
     return result
 
