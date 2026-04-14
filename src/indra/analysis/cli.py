@@ -363,13 +363,19 @@ def _idw_interpolate_dataset(
         if (ti + 1) % 100 == 0 or ti == 0:
             logger.debug("  IDW timestep %d/%d", ti + 1, len(timesteps))
 
+        # Hoist time-slice extraction out of the centroid loop: materialise
+        # each variable's 2-D grid once per timestep and reuse across all
+        # centroids.  Unit conversion is applied upstream in load_dataset().
+        ts_data: dict[str, np.ndarray] = {
+            var: ds[var].sel(time=ts).values.ravel()
+            for var in available_vars
+        }
+
         for zi, (clat, clon) in enumerate(centroids):
             row = {"time": pd.Timestamp(ts), "region_id": region_ids[zi]}
             for var in available_vars:
-                values_2d = ds[var].sel(time=ts).values
-                # Unit conversion is applied upstream in load_dataset(); no need here.
                 v, _ = idw_interpolate(
-                    clat, clon, flat_lats, flat_lons, values_2d.ravel(),
+                    clat, clon, flat_lats, flat_lons, ts_data[var],
                     radius_km=radius_km, power=idw_power,
                 )
                 row[var] = v

@@ -354,6 +354,17 @@ def compute_centroids(gdf: gpd.GeoDataFrame) -> list[tuple[float, float]]:
         logger.warning("No valid geometries found — returning empty centroids")
         return []
 
+    n_dropped = len(gdf) - len(gdf_valid)
+    if n_dropped > 0:
+        dropped_idx = gdf.index[~valid_mask].tolist()
+        logger.warning(
+            "compute_centroids: dropped %d row(s) with null/empty geometry "
+            "(original indices: %s). The returned centroids list is shorter than "
+            "the input GeoDataFrame — callers must use the filtered row ordering, "
+            "not the original gdf, to align region IDs with centroids.",
+            n_dropped, dropped_idx,
+        )
+
     # Estimate UTM zone from the centroid of all geometries
     total_centroid = gdf_valid.geometry.unary_union.centroid
     utm_zone = int((total_centroid.x + 180) / 6) + 1
@@ -502,11 +513,20 @@ def _discover_kerchunk_indexes(
             if os.path.exists(json_path):
                 json_paths.append(json_path)
             else:
-                logger.debug("No pre-built index for %s", fname)
-        if not json_paths:
+                # Mirror S3 branch: fail fast on the first missing index so we
+                # never proceed with a partial set (which would silently drop
+                # data for the missing files).
+                logger.debug(
+                    "Missing Kerchunk index for %s — falling back to full NetCDF read",
+                    fname,
+                )
+                kerchunk_ok = False
+                json_paths.clear()
+                break
+        if kerchunk_ok and not json_paths:
             logger.info("No pre-built Kerchunk indexes found in %s", kerchunk_subdir)
             kerchunk_ok = False
-        else:
+        elif kerchunk_ok:
             logger.info(
                 "Found %d pre-built Kerchunk index(es) in %s",
                 len(json_paths), kerchunk_subdir,

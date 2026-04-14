@@ -358,7 +358,7 @@ def fetch_era5_points(
 
     ds = xr.Dataset(data_vars)
     logger.info(
-        "Open-Meteo: fetched %d timesteps × %d regions × %d variables",
+        "Open-Meteo: fetched %d timesteps x %d regions x %d variables",
         n_time, n_pts, len(data_vars),
     )
     return ds
