@@ -56,6 +56,11 @@ def _mm_to_m(mm: np.ndarray) -> np.ndarray:
     return mm / 1000.0
 
 
+def _noop(x: np.ndarray) -> np.ndarray:
+    """Identity — no unit conversion needed."""
+    return x
+
+
 #: Mapping from indra ERA5 short-name (or alias) to Open-Meteo API parameter
 #: name and a unit-conversion function.  All conversions produce ERA5-native units.
 #:
@@ -67,14 +72,19 @@ def _mm_to_m(mm: np.ndarray) -> np.ndarray:
 #:    explicitly mapped to ``"wind_speed_10m"``.
 OPENMETEO_VAR_MAP: dict[str, dict[str, Any]] = {
     # 2 m temperature  (°C → K)
-    "2t":  {"om_param": "temperature_2m",  "unit_convert": _c_to_k},
-    "t2m": {"om_param": "temperature_2m",  "unit_convert": _c_to_k},
+    "2t":  {"om_param": "temperature_2m",        "unit_convert": _c_to_k},
+    "t2m": {"om_param": "temperature_2m",        "unit_convert": _c_to_k},
     # 2 m dew-point temperature  (°C → K)
     # Note: Open-Meteo parameter name is "dew_point_2m" (underscore, not joined)
-    "2d":  {"om_param": "dew_point_2m",    "unit_convert": _c_to_k},
-    "d2m": {"om_param": "dew_point_2m",    "unit_convert": _c_to_k},
+    "2d":  {"om_param": "dew_point_2m",          "unit_convert": _c_to_k},
+    "d2m": {"om_param": "dew_point_2m",          "unit_convert": _c_to_k},
     # Total precipitation  (mm → m)
-    "tp":  {"om_param": "precipitation",   "unit_convert": _mm_to_m},
+    "tp":  {"om_param": "precipitation",         "unit_convert": _mm_to_m},
+    # 2 m relative humidity  (% → %, no conversion needed)
+    # Available from Open-Meteo's ERA5-Seamless and ERA5 models.
+    # Note: this is ERA5-derived RH, which may differ slightly from
+    # IMD station-interpolated RH fetched via S3.
+    "rh":  {"om_param": "relative_humidity_2m",  "unit_convert": _noop},
 }
 
 

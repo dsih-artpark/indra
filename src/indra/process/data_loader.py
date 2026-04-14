@@ -757,7 +757,10 @@ def load_dataset(
         )
 
     # ── Open-Meteo guard: grid mode not supported ────────────────────────────
-    if weather_source == "openmeteo" and source == "era5" and not region:
+    # Guard is source-agnostic: Open-Meteo always returns point data, so
+    # region mode is required regardless of which config section the variable
+    # was defined in (era5 or imd).
+    if weather_source == "openmeteo" and not region:
         raise typer.BadParameter(
             "Open-Meteo source requires --region. "
             "Grid mode is not supported with Open-Meteo (it returns point data, not "
@@ -834,7 +837,19 @@ def load_dataset(
             om_ds = _apply_temporal_aggregation(om_ds, aggregation, variables)
             return om_ds
 
-        if weather_source == "openmeteo" and source == "era5":
+        if weather_source == "openmeteo":
+            # Strict capability check: all requested variables must be in
+            # OPENMETEO_VAR_MAP.  We do NOT silently mix S3 for unsupported
+            # vars — the user explicitly opted out of S3 by choosing this mode.
+            from indra.fetch.openmeteo import OPENMETEO_VAR_MAP
+            unsupported = [v for v in variables if v not in OPENMETEO_VAR_MAP]
+            if unsupported:
+                raise typer.BadParameter(
+                    f"--weather-source openmeteo: variable(s) {unsupported} are not "
+                    f"available via Open-Meteo. Either remove them from the metric "
+                    f"or switch to --weather-source s3. "
+                    f"Open-Meteo-capable variables: {sorted(OPENMETEO_VAR_MAP.keys())}"
+                )
             ds = _load_from_openmeteo()
             return ds, gdf, centroids
 

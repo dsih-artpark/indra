@@ -182,8 +182,10 @@ def analyze_command(
     for source, vars_list in source_vars.items():
         logger.info("Loading data from source '%s': variables=%s", source, vars_list)
 
-        # Only ERA5 respects the weather_source flag; IMD always uses S3
-        src_weather_source = weather_source if source == "era5" else "s3"
+        # All sources respect the --weather-source flag. Capability
+        # enforcement (which variables Open-Meteo can serve) happens
+        # inside load_dataset() via OPENMETEO_VAR_MAP — not here.
+        src_weather_source = weather_source
 
         _load_kwargs = dict(
             config=config,
