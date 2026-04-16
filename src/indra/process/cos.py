@@ -10,6 +10,35 @@ CLI entry point::
         --region bengaluru-zones \\
         --start-date 2024-06-01 \\
         --end-date 2024-06-30
+
+## ERA5 Grid to Zone Remapping Methodology
+
+This section describes the spatial interpolation pipeline used to remap gridded ERA5 data onto user-defined geographic zones.
+
+### 1. Region Centroid Calculation
+
+Zone boundaries are provided as shapefiles in the **WGS84** coordinate reference system (CRS). To compute accurate centroids, each region's geometry is re-projected onto the appropriate **UTM** CRS before the centroid is extracted. This ensures that centroid calculations are performed in a metric coordinate space rather than on unprojected geographic coordinates.
+
+### 2. Pre-processing
+
+Certain ERA5 variables are stored as **cumulative (accumulated) quantities** — notably precipitation (`tp`). Before spatial interpolation, these fields are **de-accumulated to an hourly scale** by differencing successive timesteps. This produces instantaneous hourly values that are consistent with non-accumulated variables and easier to work with in downstream aggregations.
+
+### 3. Spatial Interpolation (IDW)
+
+For each region centroid, the interpolated value is derived from the surrounding ERA5 grid points using **Inverse Distance Weighting (IDW)**:
+
+- All ERA5 grid points within a **25 km radius** of the centroid (measured using the **Haversine** great-circle distance formula) are considered as candidate neighbours.
+- Each candidate grid point is assigned a weight proportional to the **inverse square of its distance** from the centroid:
+  
+  $w_i = \\frac{1}{d_i^2}$
+
+- The interpolated value at the centroid is then computed as the **weighted mean** of the values at all candidate ERA5 points:
+  
+  $\\hat{v} = \\frac{\\sum_{i} w_i \\cdot v_i}{\\sum_{i} w_i}$
+
+### 4. Coincident Point Handling
+
+If the region centroid **exactly coincides** with an ERA5 grid point (i.e., $d = 0$), the interpolated value is set directly equal to the ERA5 value at that grid point, bypassing the weighted mean computation and avoiding a division-by-zero singularity.
 """
 
 import logging

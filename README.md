@@ -1,7 +1,7 @@
 # Indra v0.1.1
 
 A CLI tool for fetching data from open data sources, to be extended to forecast as well.
-Currently, only the fetching data from CDS and ECPDS is implemented.
+The project now supports multiple fetch pipelines (CDS, ECPDS, IMD variants) and processing workflows (`process cos`, `process analyze`).
 
 ## Installation
 
@@ -139,16 +139,16 @@ PASSWORD=your_app_specific_password
 
 ### Setting up Development Environment
 
-Poetry is required for development.
+`uv` is used for development and dependency management.
 
 1. Install development dependencies:
 ```bash
-poetry install --with dev
+uv sync --group dev
 ```
 
 2. Install documentation dependencies:
 ```bash
-poetry install --with docs
+uv sync --group docs
 ```
 
 ### Documentation
@@ -156,7 +156,7 @@ poetry install --with docs
 Build the documentation:
 ```bash
 cd docs
-make html
+uv run sphinx-build -b html source build/html
 ```
 
 ## License

@@ -63,10 +63,6 @@
   - ```{autodoc2-docstring} indra.process.data_loader._deaccumulate_vars
     :summary:
     ```
-* - {py:obj}`_apply_conversions <indra.process.data_loader._apply_conversions>`
-  - ```{autodoc2-docstring} indra.process.data_loader._apply_conversions
-    :summary:
-    ```
 * - {py:obj}`_apply_temporal_aggregation <indra.process.data_loader._apply_temporal_aggregation>`
   - ```{autodoc2-docstring} indra.process.data_loader._apply_temporal_aggregation
     :summary:
@@ -83,6 +79,10 @@
 :class: autosummary longtable
 :align: left
 
+* - {py:obj}`_S3_FALLBACK_ERRORS <indra.process.data_loader._S3_FALLBACK_ERRORS>`
+  - ```{autodoc2-docstring} indra.process.data_loader._S3_FALLBACK_ERRORS
+    :summary:
+    ```
 * - {py:obj}`logger <indra.process.data_loader.logger>`
   - ```{autodoc2-docstring} indra.process.data_loader.logger
     :summary:
@@ -95,9 +95,23 @@
   - ```{autodoc2-docstring} indra.process.data_loader.VAR_CF_TO_GRIB
     :summary:
     ```
+* - {py:obj}`_VAR_ALIASES <indra.process.data_loader._VAR_ALIASES>`
+  - ```{autodoc2-docstring} indra.process.data_loader._VAR_ALIASES
+    :summary:
+    ```
 ````
 
 ### API
+
+````{py:data} _S3_FALLBACK_ERRORS
+:canonical: indra.process.data_loader._S3_FALLBACK_ERRORS
+:value: >
+   ()
+
+```{autodoc2-docstring} indra.process.data_loader._S3_FALLBACK_ERRORS
+```
+
+````
 
 ````{py:data} logger
 :canonical: indra.process.data_loader.logger
@@ -171,6 +185,17 @@
 ```
 ````
 
+````{py:data} _VAR_ALIASES
+:canonical: indra.process.data_loader._VAR_ALIASES
+:type: dict[str, str]
+:value: >
+   None
+
+```{autodoc2-docstring} indra.process.data_loader._VAR_ALIASES
+```
+
+````
+
 ````{py:function} resolve_variable_sources(config: dict, variables: list[str]) -> dict[str, str]
 :canonical: indra.process.data_loader.resolve_variable_sources
 
@@ -213,13 +238,6 @@
 ```
 ````
 
-````{py:function} _apply_conversions(ds: xarray.Dataset) -> xarray.Dataset
-:canonical: indra.process.data_loader._apply_conversions
-
-```{autodoc2-docstring} indra.process.data_loader._apply_conversions
-```
-````
-
 ````{py:function} _apply_temporal_aggregation(ds: xarray.Dataset, aggregation: str, variables: list[str]) -> xarray.Dataset
 :canonical: indra.process.data_loader._apply_temporal_aggregation
 
@@ -227,7 +245,7 @@
 ```
 ````
 
-````{py:function} load_dataset(config: dict, dt_start: datetime.date, dt_end: datetime.date, variables: list[str], source: str = 'era5', region: str | None = None, local_dir: str | None = None, local_shapefile: str | None = None, aggregation: str = 'none', spatial_buffer_km: float = 25.0) -> tuple[xarray.Dataset, geopandas.GeoDataFrame | None, list[tuple[float, float]] | None]
+````{py:function} load_dataset(config: dict, dt_start: datetime.date, dt_end: datetime.date, variables: list[str], source: str = 'era5', region: str | None = None, local_dir: str | None = None, local_shapefile: str | None = None, aggregation: str = 'none', spatial_buffer_km: float = 25.0, weather_source: str = 's3') -> tuple[xarray.Dataset, geopandas.GeoDataFrame | None, list[tuple[float, float]] | None]
 :canonical: indra.process.data_loader.load_dataset
 
 ```{autodoc2-docstring} indra.process.data_loader.load_dataset

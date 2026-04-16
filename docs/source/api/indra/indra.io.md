@@ -57,7 +57,7 @@ indra.io.kerchunk_index
 ````{py:data} __all__
 :canonical: indra.io.__all__
 :value: >
-   ['download_from_s3', 'download_from_url', 'generate_kerchunk_index', 'get_params', 'open_virtual_dataset', 'retry_session', 'upload_data_to_s3', 'upload_single_file_to_s3']
+   ['download_from_s3', 'download_from_url', 'generate_kerchunk_index', 'get_params', 'open_virtual_dat...
 
 ```{autodoc2-docstring} indra.io.__all__
 ```
