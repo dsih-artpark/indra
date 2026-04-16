@@ -6,10 +6,11 @@ region centroids, and outputs a local CSV.
 
 CLI entry point::
 
-    indra process cos config.yaml \\
+    indra process cos \\
         --region bengaluru-zones \\
         --start-date 2024-06-01 \\
-        --end-date 2024-06-30
+        --end-date 2024-06-30 \
+        config.yaml
 
 ## ERA5 Grid to Zone Remapping Methodology
 

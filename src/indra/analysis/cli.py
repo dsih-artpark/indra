@@ -2,11 +2,12 @@
 
 Usage::
 
-    indra process analyze config.yaml \\
+    indra process analyze \\
         --metrics metrics.yaml \\
         --region bengaluru-zones \\
         --start-date 2024-06-01 --end-date 2024-09-30 \\
-        --output output/metrics.csv
+        --output output/metrics.csv \
+        config.yaml
 """
 
 import logging

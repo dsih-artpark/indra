@@ -52,10 +52,10 @@ key: YOUR-API-KEY
 indra fetch cds config.yaml
 
 # Fetch CDS data with custom date range (specified in yaml)
-indra fetch cds config.yaml --custom-date
+indra fetch cds --custom-date config.yaml
 
 # Enable debug mode
-indra fetch cds config.yaml --debug
+indra fetch cds --debug config.yaml
 
 # Set custom log level and file
 indra --log-level DEBUG --log-file "custom.log" fetch cds config.yaml

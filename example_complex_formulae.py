@@ -21,7 +21,7 @@ Usage in metrics.yaml::
 To use:
     1. Place this file in the working directory (or use --plugin-dir)
     2. Reference it in your metrics.yaml as shown above
-    3. Run: indra process analyze config.yaml --metrics metrics.yaml
+    3. Run: indra process analyze --metrics metrics.yaml config.yaml
 
 Plugin function requirements:
     - Must accept an xr.DataArray (single-variable) or dict[str, xr.DataArray]
