@@ -15,6 +15,8 @@
 
 indra.io.upload
 indra.io.download
+indra.io.s3_read
+indra.io.kerchunk_index
 ```
 
 ## Package Contents
@@ -55,7 +57,7 @@ indra.io.download
 ````{py:data} __all__
 :canonical: indra.io.__all__
 :value: >
-   ['download_from_url', 'get_params', 'retry_session', 'upload_data_to_s3']
+   ['download_from_s3', 'download_from_url', 'generate_kerchunk_index', 'get_params', 'open_virtual_dat...
 
 ```{autodoc2-docstring} indra.io.__all__
 ```

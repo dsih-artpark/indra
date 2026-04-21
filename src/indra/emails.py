@@ -41,18 +41,60 @@ class Report:
         else:
             self.run_date = run_date
 
-        self.email_addresses = [email.split('<')[1].split('>')[0] for email in email_recipients]
-        self.email_recipients = ", ".join(email_recipients)
+        # Normalise recipients: handle None, empty list, or bare string
+        if not email_recipients:
+            logger.warning(
+                "No email_recipients configured — email notifications disabled."
+            )
+            self.email_addresses = []
+            self.email_recipients = ""
+        else:
+            if isinstance(email_recipients, str):
+                email_recipients = [email_recipients]
 
+            def extract_email(email: str) -> str:
+                if '<' in email and '>' in email:
+                    return email.split('<')[1].split('>')[0]
+                return email.strip()
+
+            self.email_addresses = [extract_email(email) for email in email_recipients]
+            self.email_recipients = ", ".join(email_recipients)
 
         self.reports = []
 
         load_dotenv()
 
         self.SMTP_SERVER = os.getenv('SMTP_SERVER')
-        self.PORT = os.getenv('PORT')
+        port_str = os.getenv('PORT')
+        try:
+            self.PORT = int(port_str) if port_str else 587
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid PORT value '%s' — defaulting to 587 (SMTP-TLS).",
+                port_str,
+            )
+            self.PORT = 587
         self.EMAIL = os.getenv('EMAIL')
         self.PASSWORD = os.getenv('PASSWORD')
+
+        # Determine if email sending is possible
+        missing_env = [k for k, v in {
+            'SMTP_SERVER': self.SMTP_SERVER,
+            'PORT': self.PORT,
+            'EMAIL': self.EMAIL,
+            'PASSWORD': self.PASSWORD,
+        }.items() if not v]
+        if missing_env:
+            logger.warning(
+                "Missing SMTP environment variable(s): %s — "
+                "email notifications disabled.",
+                missing_env,
+            )
+            self.email_enabled = False
+        elif not self.email_addresses:
+            self.email_enabled = False
+        else:
+            self.email_enabled = True
 
         self.message = MIMEMultipart()
 
@@ -121,16 +163,41 @@ class Report:
             logger.error(f"Failed to attach file {filepath}: {e}")
             raise
 
-    def send_email(self):
+    def send_email(self, raise_on_error: bool = False) -> bool:
+        """Send the collated report via SMTP.
+
+        No-ops gracefully if email is disabled.
+
+        :param bool raise_on_error:
+            If ``True``, re-raise the exception after logging.  Default ``False``.
+        :returns:
+            ``True`` on successful send, ``False`` on failure or if disabled.
+        """
+        if not self.email_enabled:
+            logger.info(
+                "Email notifications are disabled (missing recipients or SMTP config). "
+                "Skipping email send."
+            )
+            return False
 
         text = self.collate_report_entries()
-
-        with smtplib.SMTP(self.SMTP_SERVER, self.PORT) as server:
-            logger.info("Connecting to email server")
-            server.starttls(context=ssl.create_default_context())
-            server.login(self.EMAIL, self.PASSWORD)
-            server.sendmail(self.EMAIL, self.email_addresses, text)
-            logger.info("Email sent successfully")
+        try:
+            with smtplib.SMTP(self.SMTP_SERVER, self.PORT) as server:
+                logger.info("Connecting to email server")
+                server.starttls(context=ssl.create_default_context())
+                server.login(self.EMAIL, self.PASSWORD)
+                server.sendmail(self.EMAIL, self.email_addresses, text)
+                logger.info("Email sent successfully")
+                return True
+        except Exception:
+            recipient_summary = f"{len(self.email_addresses)} recipient(s)"
+            logger.exception(
+                "Failed to send email to %s via %s:%s",
+                recipient_summary, self.SMTP_SERVER, self.PORT,
+            )
+            if raise_on_error:
+                raise
+            return False
 
     def any_criticals(self):
         return any([report.status == Status.CRITICAL for report in self.reports])

@@ -17,6 +17,7 @@ from indra.fetch import (
     imd_river_basin_qpf_app,
 )
 from indra.logging_config import configure_logging
+from indra.process import app as process_app
 
 # Create the main app
 app = typer.Typer(
@@ -93,6 +94,9 @@ def main(
 
 # Add fetch as a subcommand to main app
 app.add_typer(fetch_app, name="fetch")
+
+# Add process as a subcommand to main app
+app.add_typer(process_app, name="process")
 
 # Add cds as a subcommand to fetch
 fetch_app.add_typer(cds_app, name="cds")

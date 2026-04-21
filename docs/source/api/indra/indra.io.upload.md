@@ -19,6 +19,10 @@
   - ```{autodoc2-docstring} indra.io.upload.upload_data_to_s3
     :summary:
     ```
+* - {py:obj}`upload_single_file_to_s3 <indra.io.upload.upload_single_file_to_s3>`
+  - ```{autodoc2-docstring} indra.io.upload.upload_single_file_to_s3
+    :summary:
+    ```
 ````
 
 ### Data
@@ -49,5 +53,12 @@
 :canonical: indra.io.upload.upload_data_to_s3
 
 ```{autodoc2-docstring} indra.io.upload.upload_data_to_s3
+```
+````
+
+````{py:function} upload_single_file_to_s3(local_path: str, bucket: str, key: str, *, delete_after: bool = True) -> bool
+:canonical: indra.io.upload.upload_single_file_to_s3
+
+```{autodoc2-docstring} indra.io.upload.upload_single_file_to_s3
 ```
 ````

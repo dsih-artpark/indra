@@ -1,26 +1,27 @@
 shared_params:
   local_data_dir: "~/.dsih-data/"
   email_recipients:
-    "User <user@example.com>"
-  s3_bucket: 'example-bucket-name'
+    - "User <user@example.com>"
+  s3_bucket: 'dsih-artpark-03-standardised-data'
+  aws_region: 'ap-south-1'
 
 cds:
-  cds_dataset_name: "reanalysis-era5-single-levels"
+  cds_dataset_name: "reanalysis-era5-land"
   bounds_nwse:
-    ka: [19,74,11,79]  # Example bounds for Karnataka
+    india: [37.5, 67.5, 5.5, 98.5]  # All-India + ~50km buffer
   variables:
     "2m_temperature": "2t"
     "2m_dewpoint_temperature": "2d"
     "total_precipitation": "tp"
-    "10m_u_component_of_wind": "10u"
-    "10m_v_component_of_wind": "10v"
-  start_date: None  # Will be set automatically if using --current-month
-  end_date: None    # Will be set automatically if using --current-month
+  start_date: null  # Will be set automatically if using --current-month
+  end_date: null    # Will be set automatically if using --current-month
   ds_id: 'MW0016DS0046'
   ds_name: "ERA5_Reanalysis_Single_Level"
-  folder_name: "all_india_netcdf"
+  folder_name: "all_india_land"
   ds_source: "ECMWF CDS"
   extension: "nc"
+  max_workers: 12
+  pipeline_workers: 3  # Workers for download+index+upload pipeline (independent of max_workers)
 
 ecpds:
   url: 'https://data.ecmwf.int/forecasts'
@@ -37,3 +38,48 @@ ecpds:
   folder_name: '00z_ifs_0p25_oper'
   ds_source: 'ECMWF ECPDS'
   extensions: ["grib2", "index"]
+
+# ERA5 grid configuration (used by CoS module)
+era5:
+  resolution_deg: 0.1
+  s3_prefix: "MW0016DS0046-ERA5_Reanalysis_Single_Level/all_india_land"
+  file_pattern: "era5_land_{variable}_{year}_{month}.nc"
+  index_pattern: "era5_land_{variable}_{year}_{month}.json"
+
+# IMD grid configuration (used by analysis module)
+imd:
+  s3_prefix: "MW0018DS0052-IMD_Grid/gridded_data"
+  file_pattern: "imd_{variable}_{year}.nc"
+  variables:
+    "relative_humidity": "rh"
+    "rainfall": "rain"
+
+# Region profiles — add a block per city/granularity
+regions:
+  bengaluru-zones:
+    s3_key: "boundaries/GBA_zone_boundary_standardized.geojson"
+    id_field: "id"            # Feature-level id e.g. "zone_gba-n-1"
+    name_field: "regionName"  # e.g. "NORTH CORPORATION ZONE 1"
+  bengaluru-wards:
+    s3_key: "boundaries/GBA_ward_boundary_standardized.geojson"
+    id_field: "id"
+    name_field: "regionName"
+  bengaluru-corporation:
+    s3_key: "boundaries/GBA_corporation_boundary_standardized.geojson"
+    id_field: "id"
+    name_field: "regionName"
+
+# IDW tuning parameters (used by CoS module)
+cos:
+  idw_power: 2
+  search_radius_km: 25
+
+# Open-Meteo API configuration (optional).
+# Used when --weather-source openmeteo or --weather-source auto is set.
+# Supports any region profile — centroids are derived from the user's shapefile.
+openmeteo:
+  api_url: "https://archive-api.open-meteo.com/v1/archive"
+  model: "era5_seamless"   # "era5_seamless" (default, best accuracy) or "era5" (0.25° res)
+  api_key: null        # Optional — set for commercial API tier
+  max_retries: 3
+  timeout: 60          # seconds per request

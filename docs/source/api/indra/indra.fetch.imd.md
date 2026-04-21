@@ -19,10 +19,6 @@
   - ```{autodoc2-docstring} indra.fetch.imd.clean_imd_data
     :summary:
     ```
-* - {py:obj}`retrieve_live_data_from_imd <indra.fetch.imd.retrieve_live_data_from_imd>`
-  - ```{autodoc2-docstring} indra.fetch.imd.retrieve_live_data_from_imd
-    :summary:
-    ```
 * - {py:obj}`main <indra.fetch.imd.main>`
   - ```{autodoc2-docstring} indra.fetch.imd.main
     :summary:
@@ -74,14 +70,7 @@
 ```
 ````
 
-````{py:function} retrieve_live_data_from_imd(datacode: str, timecode: str, params: dict)
-:canonical: indra.fetch.imd.retrieve_live_data_from_imd
-
-```{autodoc2-docstring} indra.fetch.imd.retrieve_live_data_from_imd
-```
-````
-
-````{py:function} main(ctx: typer.Context, yaml_path: typing.Annotated[pathlib.Path, typer.Argument(exists=True, dir_okay=False, resolve_path=True, help='Path to YAML configuration file containing IMD parameters')], debug: typing.Annotated[bool, typer.Option('--debug/--no-debug', '-d/-D', help='Enable debug mode, send email without actually downloading data')] = False, timecode: typing.Annotated[typing.Optional[str], typer.Option('--timecode', '-t', help='Timecode to retrieve data for')] = None) -> None
+````{py:function} main(*, ctx: typer.Context, yaml_path: typing.Annotated[pathlib.Path, typer.Argument(exists=True, dir_okay=False, resolve_path=True, help='Path to YAML configuration file containing IMD parameters')], directory: typing.Annotated[typing.Optional[str], typer.Option('--directory', '-d', help='Directory to store the data')] = None, run_summary_path: typing.Annotated[typing.Optional[str], typer.Option('--run-summary-path', '-r', help='Path to the run summary file')] = None, email: typing.Annotated[typing.Optional[bool], typer.Option('--email', '-e', help='Send email with the run summary')] = False, download_frequency: typing.Annotated[typing.Optional[str], typer.Option('--download-frequency', '-f', help='Download frequency')] = 'hourly') -> None
 :canonical: indra.fetch.imd.main
 
 ```{autodoc2-docstring} indra.fetch.imd.main
